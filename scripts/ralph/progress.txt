@@ -16,6 +16,8 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - Structured tool extraction is best-effort; failures should be recorded in manifest `analysis.notes` and only printed under `--mcpcc-verbose`.
 - Structured tools embed argv mapping metadata in `tool.x-mcpcc.argvMapping` with deterministic `options[]` ordering and an `argsParam` for positionals.
 - When an extractor provides per-option docs, populate `inputSchema.properties.<param>.description` for better tool-call UX.
+- In `mcpcc_annot.h`, use a `MCPCC_CONCAT()` helper so `__COUNTER__` expands when token-pasting; otherwise GCC may treat it literally and cause symbol redefinition.
+- When annotation tests use a real system compiler, pre-create output directories (e.g. `bin/`) since fake compilers `mkdir -p` but `cc`/`ld` won't.
 ---
 
 ## 2026-01-26 12:43:45 +0300 - US-001
@@ -119,4 +121,17 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: `argp` doc strings map cleanly onto `inputSchema.properties.<param>.description`.
   - Gotchas encountered: if `/projects` fills up, run cargo commands with `CARGO_TARGET_DIR=/tmp/...` and free space via `cargo clean`.
   - Useful context: extractor selection currently prefers `getopt_long` then `argp` (US-011 will adjust ordering once annotations are supported).
+---
+
+## 2026-01-26 15:16:42 +0300 - US-010
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-10.txt (use the latest file)
+- Added `mcpcc_annot.h` (C annotation header) with `MCPCC_TOOL_JSON(...)` / `MCPCC_PARAM_JSON(...)` for embedding JSON annotations into a `.mcpcc` section.
+- Implemented `.mcpcc` section reading from the linked executable and parsing `MCPCC_TOOL:` / `MCPCC_PARAM:` payloads, then merged annotations over extractor output deterministically.
+- Tool-level annotations override `title`/`description` and write exec limits under `tool.x-mcpcc.exec`; param annotations override `inputSchema` + `x-mcpcc.argvMapping` entries.
+- Added integration tests for annotation-only structured tools and for annotation overrides over the `argp` extractor.
+- Files changed: `crates/mcpcc/Cargo.toml`, `Cargo.lock`, `crates/mcpcc/src/lib.rs`, `crates/mcpcc/tests/annotations.rs`, `mcpcc_annot.h`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: keep annotations best-effort (invalid/non-ELF binaries should add notes but must not fail builds/tests).
+  - Gotchas encountered: `__COUNTER__` needs a concat helper macro to expand under token-pasting, and real `cc` builds need the output directory created beforehand.
+  - Useful context: annotation-only param specs now generate a structured `<base>` tool even when no `argp`/`getopt_long` patterns exist in sources.
 ---

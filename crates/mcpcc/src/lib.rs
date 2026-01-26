@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use object::{Object, ObjectSection};
 use sha2::{Digest, Sha256};
 
 pub const MCP_SPEC_VERSION: &str = "2025-11-25";
@@ -409,6 +410,40 @@ pub struct AnalysisSummary {
     pub notes: Vec<String>,
 }
 
+const MCPCC_ANNOT_SECTION: &str = ".mcpcc";
+const MCPCC_TOOL_PREFIX: &str = "MCPCC_TOOL:";
+const MCPCC_PARAM_PREFIX: &str = "MCPCC_PARAM:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolAnnotation {
+    name: String,
+    title: Option<String>,
+    description: Option<String>,
+    timeout_ms: Option<u64>,
+    max_stdout_bytes: Option<u64>,
+    max_stderr_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParamAnnotation {
+    tool: String,
+    property: String,
+    long: Option<String>,
+    short: Option<String>,
+    takes_value: Option<bool>,
+    ty: Option<String>,
+    repeatable: Option<bool>,
+    required: Option<bool>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct McpccAnnotations {
+    tools: Vec<ToolAnnotation>,
+    params: Vec<ParamAnnotation>,
+    notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LlmEnv {
     pub openrouter_api_key: Option<String>,
@@ -684,6 +719,583 @@ pub fn build_mcp_json(
     })
 }
 
+fn non_empty_string(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+fn non_empty_str_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    obj.get(key).and_then(non_empty_string)
+}
+
+fn optional_bool_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<bool>, String> {
+    let Some(value) = obj.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .ok_or_else(|| format!("{key} must be a boolean"))
+        .map(Some)
+}
+
+fn optional_u64_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<u64>, String> {
+    let Some(value) = obj.get(key) else {
+        return Ok(None);
+    };
+
+    if let Some(n) = value.as_u64() {
+        return Ok(Some(n));
+    }
+    if let Some(n) = value.as_i64() {
+        return if n >= 0 {
+            Ok(Some(n as u64))
+        } else {
+            Err(format!("{key} must be non-negative"))
+        };
+    }
+
+    Err(format!("{key} must be an integer"))
+}
+
+fn parse_tool_annotation_json(payload: &str) -> Result<ToolAnnotation, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(payload).map_err(|err| format!("invalid JSON: {err}"))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "tool annotation must be a JSON object".to_string())?;
+
+    let name = obj
+        .get("name")
+        .and_then(non_empty_string)
+        .ok_or_else(|| "tool annotation missing required string field: name".to_string())?;
+
+    Ok(ToolAnnotation {
+        name,
+        title: non_empty_str_field(obj, "title"),
+        description: non_empty_str_field(obj, "description"),
+        timeout_ms: optional_u64_field(obj, "timeoutMs")?,
+        max_stdout_bytes: optional_u64_field(obj, "maxStdoutBytes")?,
+        max_stderr_bytes: optional_u64_field(obj, "maxStderrBytes")?,
+    })
+}
+
+fn parse_param_annotation_json(payload: &str) -> Result<ParamAnnotation, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(payload).map_err(|err| format!("invalid JSON: {err}"))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "param annotation must be a JSON object".to_string())?;
+
+    let tool = obj
+        .get("tool")
+        .and_then(non_empty_string)
+        .ok_or_else(|| "param annotation missing required string field: tool".to_string())?;
+    let property = obj
+        .get("property")
+        .and_then(non_empty_string)
+        .ok_or_else(|| "param annotation missing required string field: property".to_string())?;
+
+    let ty = non_empty_str_field(obj, "type").and_then(|ty| {
+        matches!(ty.as_str(), "boolean" | "string" | "integer" | "number").then_some(ty)
+    });
+    if obj.get("type").is_some() && ty.is_none() {
+        return Err("type must be one of: boolean|string|integer|number".to_string());
+    }
+
+    Ok(ParamAnnotation {
+        tool,
+        property,
+        long: non_empty_str_field(obj, "long"),
+        short: non_empty_str_field(obj, "short"),
+        takes_value: optional_bool_field(obj, "takesValue")?,
+        ty,
+        repeatable: optional_bool_field(obj, "repeatable")?,
+        required: optional_bool_field(obj, "required")?,
+        description: non_empty_str_field(obj, "description"),
+    })
+}
+
+fn parse_mcpcc_annotation_section(section_data: &[u8]) -> McpccAnnotations {
+    let mut out = McpccAnnotations::default();
+
+    for raw in section_data.split(|b| *b == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(raw) else {
+            continue;
+        };
+        let text = text.trim();
+        if let Some(payload) = text.strip_prefix(MCPCC_TOOL_PREFIX) {
+            match parse_tool_annotation_json(payload) {
+                Ok(annotation) => out.tools.push(annotation),
+                Err(err) => out
+                    .notes
+                    .push(format!("annotation tool parse failed: {err}")),
+            }
+            continue;
+        }
+        if let Some(payload) = text.strip_prefix(MCPCC_PARAM_PREFIX) {
+            match parse_param_annotation_json(payload) {
+                Ok(annotation) => out.params.push(annotation),
+                Err(err) => out
+                    .notes
+                    .push(format!("annotation param parse failed: {err}")),
+            }
+        }
+    }
+
+    out
+}
+
+fn read_mcpcc_annotations(bin_path: &Path) -> McpccAnnotations {
+    let bytes = match std::fs::read(bin_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return McpccAnnotations {
+                notes: vec![format!(
+                    "annotation read failed for {}: {err}",
+                    bin_path.display()
+                )],
+                ..Default::default()
+            };
+        }
+    };
+
+    let file = match object::File::parse(&*bytes) {
+        Ok(file) => file,
+        Err(err) => {
+            return McpccAnnotations {
+                notes: vec![format!(
+                    "annotation parse failed for {}: {err}",
+                    bin_path.display()
+                )],
+                ..Default::default()
+            };
+        }
+    };
+
+    let Some(section) = file.section_by_name(MCPCC_ANNOT_SECTION) else {
+        return McpccAnnotations::default();
+    };
+
+    let section_data = match section.data() {
+        Ok(data) => data,
+        Err(err) => {
+            return McpccAnnotations {
+                notes: vec![format!("annotation section read failed: {err}")],
+                ..Default::default()
+            };
+        }
+    };
+
+    parse_mcpcc_annotation_section(section_data)
+}
+
+fn annotation_schema_type(annotation: &ParamAnnotation) -> Option<&'static str> {
+    if let Some(ty) = annotation.ty.as_deref() {
+        return Some(match ty {
+            "boolean" => "boolean",
+            "string" => "string",
+            "integer" => "integer",
+            "number" => "number",
+            _ => return None,
+        });
+    }
+
+    annotation
+        .takes_value
+        .map(|takes_value| if takes_value { "string" } else { "boolean" })
+}
+
+fn annotation_arg_requirement(annotation: &ParamAnnotation) -> Option<&'static str> {
+    if annotation.ty.is_none() && annotation.takes_value.is_none() {
+        return None;
+    }
+
+    match annotation_schema_type(annotation) {
+        Some("boolean") => Some("none"),
+        Some(_) => Some("required"),
+        None => None,
+    }
+}
+
+fn apply_tool_annotation(tool: &mut serde_json::Value, annotation: &ToolAnnotation) -> bool {
+    let Some(obj) = tool.as_object_mut() else {
+        return false;
+    };
+
+    let mut changed = false;
+    if let Some(title) = annotation.title.as_ref() {
+        obj.insert(
+            "title".to_string(),
+            serde_json::Value::String(title.clone()),
+        );
+        changed = true;
+    }
+    if let Some(description) = annotation.description.as_ref() {
+        obj.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.clone()),
+        );
+        changed = true;
+    }
+
+    if annotation.timeout_ms.is_some()
+        || annotation.max_stdout_bytes.is_some()
+        || annotation.max_stderr_bytes.is_some()
+    {
+        let x_mcpcc = obj
+            .entry("x-mcpcc".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !x_mcpcc.is_object() {
+            *x_mcpcc = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let x_obj = x_mcpcc.as_object_mut().expect("x-mcpcc object");
+        let exec = x_obj
+            .entry("exec".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !exec.is_object() {
+            *exec = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let exec_obj = exec.as_object_mut().expect("exec object");
+
+        if let Some(timeout_ms) = annotation.timeout_ms {
+            exec_obj.insert(
+                "timeoutMs".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(timeout_ms)),
+            );
+            changed = true;
+        }
+        if let Some(max_stdout_bytes) = annotation.max_stdout_bytes {
+            exec_obj.insert(
+                "maxStdoutBytes".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(max_stdout_bytes)),
+            );
+            changed = true;
+        }
+        if let Some(max_stderr_bytes) = annotation.max_stderr_bytes {
+            exec_obj.insert(
+                "maxStderrBytes".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(max_stderr_bytes)),
+            );
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn apply_param_annotation(tool: &mut serde_json::Value, annotation: &ParamAnnotation) -> bool {
+    let Some(obj) = tool.as_object_mut() else {
+        return false;
+    };
+
+    let Some(input_schema) = obj.get_mut("inputSchema").and_then(|v| v.as_object_mut()) else {
+        return false;
+    };
+    let properties = input_schema
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !properties.is_object() {
+        *properties = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let props_obj = properties.as_object_mut().expect("properties object");
+
+    let entry = props_obj
+        .entry(annotation.property.clone())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let schema_obj = entry.as_object_mut().expect("schema object");
+
+    let mut changed = false;
+    if let Some(schema_type) = annotation_schema_type(annotation) {
+        schema_obj.insert(
+            "type".to_string(),
+            serde_json::Value::String(schema_type.to_string()),
+        );
+        changed = true;
+    }
+    if let Some(description) = annotation.description.as_ref() {
+        schema_obj.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.clone()),
+        );
+        changed = true;
+    }
+
+    if annotation.required == Some(true) {
+        let required = input_schema
+            .entry("required".to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if !required.is_array() {
+            *required = serde_json::Value::Array(Vec::new());
+        }
+        let required_arr = required.as_array_mut().expect("required array");
+        if !required_arr
+            .iter()
+            .any(|v| v.as_str() == Some(&annotation.property))
+        {
+            required_arr.push(serde_json::Value::String(annotation.property.clone()));
+            changed = true;
+        }
+    }
+
+    let Some(options) = obj
+        .get_mut("x-mcpcc")
+        .and_then(|v| v.get_mut("argvMapping"))
+        .and_then(|v| v.get_mut("options"))
+        .and_then(|v| v.as_array_mut())
+    else {
+        return changed;
+    };
+
+    let mut option_obj: Option<&mut serde_json::Map<String, serde_json::Value>> = None;
+    for opt in options.iter_mut() {
+        let Some(opt_map) = opt.as_object_mut() else {
+            continue;
+        };
+        if opt_map.get("param").and_then(|v| v.as_str()) == Some(annotation.property.as_str()) {
+            option_obj = Some(opt_map);
+            break;
+        }
+    }
+
+    if option_obj.is_none() {
+        let mut new = serde_json::Map::new();
+        new.insert(
+            "param".to_string(),
+            serde_json::Value::String(annotation.property.clone()),
+        );
+        let long = annotation
+            .long
+            .clone()
+            .unwrap_or_else(|| format!("--{}", annotation.property));
+        new.insert("long".to_string(), serde_json::Value::String(long));
+        if let Some(short) = annotation.short.clone() {
+            new.insert("short".to_string(), serde_json::Value::String(short));
+        }
+        if let Some(arg) = annotation_arg_requirement(annotation) {
+            new.insert(
+                "arg".to_string(),
+                serde_json::Value::String(arg.to_string()),
+            );
+            if new.get("short").is_some() {
+                new.insert(
+                    "shortArg".to_string(),
+                    serde_json::Value::String(arg.to_string()),
+                );
+            }
+        }
+        if let Some(repeatable) = annotation.repeatable {
+            new.insert(
+                "repeatable".to_string(),
+                serde_json::Value::Bool(repeatable),
+            );
+        }
+        options.push(serde_json::Value::Object(new));
+        return true;
+    }
+
+    let opt_map = option_obj.expect("option object");
+    if let Some(long) = annotation.long.as_ref() {
+        opt_map.insert("long".to_string(), serde_json::Value::String(long.clone()));
+        changed = true;
+    }
+    if let Some(short) = annotation.short.as_ref() {
+        opt_map.insert(
+            "short".to_string(),
+            serde_json::Value::String(short.clone()),
+        );
+        changed = true;
+    }
+    if let Some(repeatable) = annotation.repeatable {
+        opt_map.insert(
+            "repeatable".to_string(),
+            serde_json::Value::Bool(repeatable),
+        );
+        changed = true;
+    }
+
+    if let Some(arg) = annotation_arg_requirement(annotation) {
+        opt_map.insert(
+            "arg".to_string(),
+            serde_json::Value::String(arg.to_string()),
+        );
+        if opt_map.get("short").is_some() {
+            opt_map.insert(
+                "shortArg".to_string(),
+                serde_json::Value::String(arg.to_string()),
+            );
+        }
+        changed = true;
+    }
+
+    changed
+}
+
+fn apply_annotations_to_mcp_json(
+    mcp_json: &mut serde_json::Value,
+    annotations: &McpccAnnotations,
+) -> bool {
+    let Some(tools) = mcp_json.get_mut("tools").and_then(|v| v.as_array_mut()) else {
+        return false;
+    };
+
+    let mut used = false;
+    for tool in tools.iter_mut() {
+        let Some(name) = tool
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+
+        for annotation in annotations.tools.iter().filter(|a| a.name == name) {
+            used |= apply_tool_annotation(tool, annotation);
+        }
+        for annotation in annotations.params.iter().filter(|a| a.tool == name) {
+            used |= apply_param_annotation(tool, annotation);
+        }
+    }
+
+    used
+}
+
+fn build_annotation_structured_tool_json(
+    artifacts: &ArtifactPaths,
+    params: &[ParamAnnotation],
+) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+
+    let mut mapping_options = Vec::new();
+    for annotation in params {
+        let Some(schema_type) = annotation_schema_type(annotation).or(Some("string")) else {
+            continue;
+        };
+        let mut schema = serde_json::Map::new();
+        schema.insert(
+            "type".to_string(),
+            serde_json::Value::String(schema_type.to_string()),
+        );
+        if let Some(description) = annotation.description.as_ref() {
+            schema.insert(
+                "description".to_string(),
+                serde_json::Value::String(description.clone()),
+            );
+        }
+        properties.insert(
+            annotation.property.clone(),
+            serde_json::Value::Object(schema),
+        );
+
+        if annotation.required == Some(true) {
+            required.push(serde_json::Value::String(annotation.property.clone()));
+        }
+
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "param".to_string(),
+            serde_json::Value::String(annotation.property.clone()),
+        );
+        let long = annotation
+            .long
+            .clone()
+            .unwrap_or_else(|| format!("--{}", annotation.property));
+        entry.insert("long".to_string(), serde_json::Value::String(long));
+
+        if let Some(short) = annotation.short.clone() {
+            entry.insert("short".to_string(), serde_json::Value::String(short));
+        }
+        let arg = annotation_arg_requirement(annotation).unwrap_or_else(|| {
+            if schema_type == "boolean" {
+                "none"
+            } else {
+                "required"
+            }
+        });
+        entry.insert(
+            "arg".to_string(),
+            serde_json::Value::String(arg.to_string()),
+        );
+        if entry.get("short").is_some() {
+            entry.insert(
+                "shortArg".to_string(),
+                serde_json::Value::String(arg.to_string()),
+            );
+        }
+        if let Some(repeatable) = annotation.repeatable {
+            entry.insert(
+                "repeatable".to_string(),
+                serde_json::Value::Bool(repeatable),
+            );
+        }
+        mapping_options.push(serde_json::Value::Object(entry));
+    }
+
+    properties.insert(
+        "args".to_string(),
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "string" },
+        }),
+    );
+
+    let mut input_schema = serde_json::Map::new();
+    input_schema.insert(
+        "type".to_string(),
+        serde_json::Value::String("object".to_string()),
+    );
+    input_schema.insert(
+        "properties".to_string(),
+        serde_json::Value::Object(properties),
+    );
+    input_schema.insert(
+        "additionalProperties".to_string(),
+        serde_json::Value::Bool(false),
+    );
+    if !required.is_empty() {
+        input_schema.insert("required".to_string(), serde_json::Value::Array(required));
+    }
+
+    serde_json::json!({
+        "name": artifacts.base_name,
+        "description": format!("Run {} with structured options.", artifacts.base_name),
+        "inputSchema": serde_json::Value::Object(input_schema),
+        "x-mcpcc": {
+            "argvMapping": {
+                "options": mapping_options,
+                "argsParam": "args",
+            },
+        },
+    })
+}
+
+fn count_tool_param_count(mcp_json: &serde_json::Value, tool_name: &str) -> Option<usize> {
+    let tools = mcp_json.get("tools")?.as_array()?;
+    let tool = tools
+        .iter()
+        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(tool_name))?;
+    let props = tool.get("inputSchema")?.get("properties")?.as_object()?;
+    Some(props.len())
+}
+
 pub fn write_mcp_json_atomic(
     artifacts: &ArtifactPaths,
     descriptions: &LlmToolDescriptions,
@@ -697,9 +1309,13 @@ pub fn write_mcp_json_atomic(
     };
     notes.extend(argp_notes);
 
+    let annotations = read_mcpcc_annotations(&artifacts.bin_path);
+    notes.extend(annotations.notes.iter().cloned());
+
     let mut analysis = AnalysisSummary::default();
     analysis.notes = notes;
-    let structured_tool = if let Some(spec) = getopt_long_spec.as_ref() {
+
+    let mut structured_tool = if let Some(spec) = getopt_long_spec.as_ref() {
         analysis.extractors = vec!["getopt_long".to_string()];
         analysis.structured_tool_generated = true;
         analysis.param_count = spec.options.len() + 1;
@@ -713,7 +1329,34 @@ pub fn write_mcp_json_atomic(
         None
     };
 
-    let mcp_json = build_mcp_json(artifacts, descriptions, structured_tool);
+    if structured_tool.is_none() {
+        let param_annotations: Vec<ParamAnnotation> = annotations
+            .params
+            .iter()
+            .filter(|a| a.tool == artifacts.base_name)
+            .cloned()
+            .collect();
+        if !param_annotations.is_empty() {
+            structured_tool = Some(build_annotation_structured_tool_json(
+                artifacts,
+                &param_annotations,
+            ));
+            analysis.structured_tool_generated = true;
+            analysis.extractors = vec!["annotation".to_string()];
+        }
+    }
+
+    let mut mcp_json = build_mcp_json(artifacts, descriptions, structured_tool);
+    let used_annotations = apply_annotations_to_mcp_json(&mut mcp_json, &annotations);
+    if used_annotations && !analysis.extractors.iter().any(|e| e == "annotation") {
+        analysis.extractors.insert(0, "annotation".to_string());
+    }
+    if analysis.structured_tool_generated {
+        if let Some(param_count) = count_tool_param_count(&mcp_json, &artifacts.base_name) {
+            analysis.param_count = param_count;
+        }
+    }
+
     write_json_atomic(&artifacts.mcp_json_path, &mcp_json)?;
 
     Ok(analysis)
