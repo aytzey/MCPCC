@@ -46,6 +46,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if parsed.wrapper.verbose {
+        eprintln!("mcpcc: using compiler: {}", compiler.display());
+    }
+
     let status = match std::process::Command::new(&compiler)
         .args(&parsed.passthrough)
         .status()
@@ -61,10 +65,44 @@ fn main() -> ExitCode {
         return exit_code_from_status(status);
     }
 
-    if let Some(artifacts) = mcpcc::plan_artifacts(&parsed.wrapper, &parsed.passthrough) {
+    let artifacts = mcpcc::plan_artifacts(&parsed.wrapper, &parsed.passthrough);
+
+    if parsed.wrapper.verbose {
+        match &artifacts {
+            Some(plan) => {
+                eprintln!("mcpcc: link detected; generating MCP artifacts");
+                eprintln!("mcpcc: bin_path: {}", plan.bin_path.display());
+                eprintln!("mcpcc: mcp_json: {}", plan.mcp_json_path.display());
+                eprintln!("mcpcc: server: {}", plan.server_path.display());
+                eprintln!("mcpcc: manifest: {}", plan.manifest_path.display());
+            }
+            None => eprintln!("mcpcc: compile-only mode detected; skipping MCP artifacts"),
+        }
+    }
+
+    if let Some(artifacts) = artifacts {
         if let Err(err) = mcpcc::write_mcp_json_atomic(&artifacts) {
             eprintln!("mcpcc: failed to write mcp.json: {err}");
-            return ExitCode::from(1);
+            return ExitCode::from(70);
+        }
+        if parsed.wrapper.verbose {
+            eprintln!(
+                "mcpcc: wrote mcp.json: {}",
+                artifacts.mcp_json_path.display()
+            );
+        }
+
+        if let Err(err) =
+            mcpcc::write_manifest_json_atomic(&compiler, &parsed.passthrough, 0, &artifacts)
+        {
+            eprintln!("mcpcc: failed to write manifest: {err}");
+            return ExitCode::from(70);
+        }
+        if parsed.wrapper.verbose {
+            eprintln!(
+                "mcpcc: wrote manifest: {}",
+                artifacts.manifest_path.display()
+            );
         }
     }
 

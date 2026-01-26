@@ -135,6 +135,46 @@ exit 0
             "temp file should not remain: {name}"
         );
     }
+
+    let manifest_path = td.path.join("bin/hello.mcpcc-manifest.json");
+    let contents = std::fs::read(&manifest_path).expect("read manifest");
+    let v: serde_json::Value = serde_json::from_slice(&contents).expect("parse manifest json");
+
+    assert_eq!(
+        v.get("binary")
+            .and_then(|b| b.get("path"))
+            .and_then(|p| p.as_str()),
+        Some("bin/hello")
+    );
+    assert_eq!(
+        v.get("compiler")
+            .and_then(|c| c.get("exitCode"))
+            .and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    assert!(
+        v.get("compiler")
+            .and_then(|c| c.get("argv"))
+            .and_then(|v| v.as_array())
+            .is_some(),
+        "manifest must include compiler.argv array"
+    );
+    assert_eq!(
+        v.get("artifacts")
+            .and_then(|a| a.get("mcpJson"))
+            .and_then(|v| v.as_str()),
+        Some("bin/hello.mcp.json")
+    );
+    assert!(
+        v.get("analysis").and_then(|v| v.as_object()).is_some(),
+        "manifest must include analysis object"
+    );
+    assert!(
+        v.get("llm")
+            .and_then(|l| l.get("mode"))
+            .map_or(false, |v| v.is_null()),
+        "manifest must include llm placeholders"
+    );
 }
 
 #[test]
@@ -193,6 +233,10 @@ exit 0
         !td.path.join("obj/hello.o.mcp.json").exists(),
         "compile-only mode must not produce mcp.json"
     );
+    assert!(
+        !td.path.join("obj/hello.o.mcpcc-manifest.json").exists(),
+        "compile-only mode must not produce manifest"
+    );
 }
 
 #[test]
@@ -224,5 +268,77 @@ fn does_not_write_mcp_json_when_compiler_fails() {
     assert!(
         !td.path.join("bin/hello.mcp.json").exists(),
         "non-zero compiler exit must not produce mcp.json"
+    );
+    assert!(
+        !td.path.join("bin/hello.mcpcc-manifest.json").exists(),
+        "non-zero compiler exit must not produce manifest"
+    );
+}
+
+#[test]
+fn mcp_generation_failure_exits_70() {
+    let td = TempDir::new("mcpcc-mcp-gen-fails");
+    let cc_path = write_exe(
+        &td.path,
+        "fakecc",
+        br#"#!/bin/sh
+set -eu
+out="a.out"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out="$a"
+    prev=""
+    continue
+  fi
+  case "$a" in
+    -o)
+      prev="-o"
+      ;;
+    -o*)
+      out="${a#-o}"
+      ;;
+  esac
+done
+mkdir -p "$(dirname "$out")"
+: > "$out"
+exit 0
+"#,
+    );
+
+    let bin = env!("CARGO_BIN_EXE_mcpcc");
+    let out = Command::new(bin)
+        .current_dir(&td.path)
+        .arg("--mcpcc-cc")
+        .arg(&cc_path)
+        .arg("--mcpcc-mcp-json-out")
+        .arg("bin")
+        .arg("--")
+        .arg("hello.c")
+        .arg("-o")
+        .arg("bin/hello")
+        .output()
+        .expect("run mcpcc");
+
+    assert_eq!(
+        out.status.code(),
+        Some(70),
+        "expected exit 70, got: {:?}\nstdout: {}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !td.path.join("bin/hello.mcp.json").exists(),
+        "failed MCP generation must not produce mcp.json"
+    );
+    assert!(
+        !td.path.join("bin/hello.mcpcc-manifest.json").exists(),
+        "failed MCP generation must not produce manifest"
+    );
+    assert!(
+        td.path.join("bin").is_dir(),
+        "mcp generation should not clobber existing directories"
     );
 }

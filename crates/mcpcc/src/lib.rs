@@ -9,6 +9,7 @@ pub const MCP_SPEC_VERSION: &str = "2025-11-25";
 pub struct WrapperFlags {
     pub cc: Option<String>,
     pub print_cc: bool,
+    pub verbose: bool,
     pub artifacts_dir: Option<PathBuf>,
     pub mcp_json_out: Option<PathBuf>,
     pub server_out: Option<PathBuf>,
@@ -101,6 +102,12 @@ fn consume_wrapper_flag(
 
     if arg == "--mcpcc-print-cc" {
         wrapper.print_cc = true;
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-verbose" {
+        wrapper.verbose = true;
         *idx += 1;
         return Ok(true);
     }
@@ -198,29 +205,31 @@ pub struct ArtifactPaths {
 }
 
 #[derive(Debug)]
-pub enum McpJsonWriteError {
+pub enum JsonWriteError {
     Io(std::io::Error),
     Json(serde_json::Error),
 }
 
-impl std::fmt::Display for McpJsonWriteError {
+pub type McpJsonWriteError = JsonWriteError;
+
+impl std::fmt::Display for JsonWriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            McpJsonWriteError::Io(err) => write!(f, "{err}"),
-            McpJsonWriteError::Json(err) => write!(f, "{err}"),
+            JsonWriteError::Io(err) => write!(f, "{err}"),
+            JsonWriteError::Json(err) => write!(f, "{err}"),
         }
     }
 }
 
-impl std::error::Error for McpJsonWriteError {}
+impl std::error::Error for JsonWriteError {}
 
-impl From<std::io::Error> for McpJsonWriteError {
+impl From<std::io::Error> for JsonWriteError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
     }
 }
 
-impl From<serde_json::Error> for McpJsonWriteError {
+impl From<serde_json::Error> for JsonWriteError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
     }
@@ -254,11 +263,70 @@ pub fn build_minimal_mcp_json(artifacts: &ArtifactPaths) -> serde_json::Value {
     })
 }
 
-pub fn write_mcp_json_atomic(artifacts: &ArtifactPaths) -> Result<(), McpJsonWriteError> {
+pub fn write_mcp_json_atomic(artifacts: &ArtifactPaths) -> Result<(), JsonWriteError> {
     let mcp_json = build_minimal_mcp_json(artifacts);
-    let bytes = serde_json::to_vec_pretty(&mcp_json)?;
+    write_json_atomic(&artifacts.mcp_json_path, &mcp_json)?;
 
-    let out_path = &artifacts.mcp_json_path;
+    Ok(())
+}
+
+pub fn build_manifest_json(
+    compiler: &Path,
+    compiler_args: &[String],
+    compiler_exit_code: i32,
+    artifacts: &ArtifactPaths,
+) -> serde_json::Value {
+    let compiler_path = compiler.to_string_lossy();
+    let mut argv = Vec::with_capacity(1 + compiler_args.len());
+    argv.push(compiler_path.to_string());
+    argv.extend(compiler_args.iter().cloned());
+
+    serde_json::json!({
+        "mcpccVersion": env!("CARGO_PKG_VERSION"),
+        "mcpSpecVersion": MCP_SPEC_VERSION,
+        "binary": {
+            "path": artifacts.bin_path.to_string_lossy(),
+        },
+        "compiler": {
+            "cc": compiler_path,
+            "argv": argv,
+            "exitCode": compiler_exit_code,
+        },
+        "analysis": {
+            "usedLibclang": false,
+            "extractors": [],
+            "structuredToolGenerated": false,
+            "paramCount": 0,
+            "notes": [],
+        },
+        "llm": {
+            "mode": null,
+            "provider": null,
+            "model": null,
+            "cacheHit": null,
+            "promptVersion": null,
+        },
+        "artifacts": {
+            "mcpJson": artifacts.mcp_json_path.to_string_lossy(),
+            "server": artifacts.server_path.to_string_lossy(),
+            "manifest": artifacts.manifest_path.to_string_lossy(),
+        },
+    })
+}
+
+pub fn write_manifest_json_atomic(
+    compiler: &Path,
+    compiler_args: &[String],
+    compiler_exit_code: i32,
+    artifacts: &ArtifactPaths,
+) -> Result<(), JsonWriteError> {
+    let manifest = build_manifest_json(compiler, compiler_args, compiler_exit_code, artifacts);
+    write_json_atomic(&artifacts.manifest_path, &manifest)?;
+    Ok(())
+}
+
+fn write_json_atomic(out_path: &Path, json: &serde_json::Value) -> Result<(), JsonWriteError> {
+    let bytes = serde_json::to_vec_pretty(json)?;
 
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -291,7 +359,7 @@ pub fn write_mcp_json_atomic(artifacts: &ArtifactPaths) -> Result<(), McpJsonWri
 
     if let Err(err) = std::fs::rename(&tmp_path, out_path) {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(McpJsonWriteError::Io(err));
+        return Err(JsonWriteError::Io(err));
     }
 
     Ok(())
@@ -590,6 +658,7 @@ mod tests {
         let parsed = parse_args(&v(&[
             "--mcpcc-cc",
             "mycc",
+            "--mcpcc-verbose",
             "--mcpcc-print-cc",
             "--",
             "-Wall",
@@ -597,6 +666,7 @@ mod tests {
         ]))
         .expect("parse");
         assert_eq!(parsed.wrapper.cc.as_deref(), Some("mycc"));
+        assert!(parsed.wrapper.verbose);
         assert!(parsed.wrapper.print_cc);
         assert_eq!(parsed.passthrough, v(&["-Wall", "hello.c"]));
     }
@@ -608,10 +678,12 @@ mod tests {
             "--mcpcc-cc=clang",
             "--mcpcc-artifacts-dir=artifacts",
             "hello.c",
+            "--mcpcc-verbose",
             "--mcpcc-print-cc",
         ]))
         .expect("parse");
         assert_eq!(parsed.wrapper.cc.as_deref(), Some("clang"));
+        assert!(parsed.wrapper.verbose);
         assert!(parsed.wrapper.print_cc);
         assert_eq!(
             parsed.wrapper.artifacts_dir.as_deref(),
