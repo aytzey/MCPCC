@@ -1,3 +1,17 @@
 # Ralph Progress Log
 Started: Mon Jan 26 12:36:03 PM +03 2026
 ---
+## Codebase Patterns
+- Rust workspace lives at repo root (`Cargo.toml`) with member crates under `crates/`.
+- Run `cargo fmt --all --check && cargo test && cargo check` before committing.
+---
+
+## 2026-01-26 12:43:45 +0300 - US-001
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-20260126-124331.txt
+- Bootstrapped a Rust Cargo workspace with `mcpcc` and `mcpcc-mcp-server` binaries.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `.gitignore`, `crates/mcpcc/*`, `crates/mcpcc-mcp-server/*`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: workspace members are kept under `crates/`.
+  - Gotchas encountered: `cargo fmt --all --check` will fail on extra trailing blank lines.
+  - Useful context: current quality gate is `cargo fmt --all --check`, `cargo test`, `cargo check`.
+---
