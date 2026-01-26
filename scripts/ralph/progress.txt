@@ -4,6 +4,7 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 ## Codebase Patterns
 - Rust workspace lives at repo root (`Cargo.toml`) with member crates under `crates/`.
 - Run `cargo fmt --all --check && cargo test && cargo check` before committing.
+- On this runner, `/projects` can fill up; set `CARGO_TARGET_DIR` to a path on `/tmp` for builds/tests and use `cargo clean` if you hit ENOSPC.
 - For integration tests, run binaries via `env!("CARGO_BIN_EXE_<bin>")` instead of shelling out to `cargo run`.
 - For compiler-invocation tests, point `--mcpcc-cc` at a temp-dir shell-script "fake compiler" to assert argv + exit-code behavior.
 - When integration tests invoke `mcpcc`, set `Command::current_dir` to a temp dir so generated artifacts don't pollute the repo.
@@ -14,6 +15,7 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - For LLM integration tests, point `MCPCC_OPENROUTER_BASE_URL` at a local mock server and set `--mcpcc-cache-dir` to a temp dir to avoid global cache/network.
 - Structured tool extraction is best-effort; failures should be recorded in manifest `analysis.notes` and only printed under `--mcpcc-verbose`.
 - Structured tools embed argv mapping metadata in `tool.x-mcpcc.argvMapping` with deterministic `options[]` ordering and an `argsParam` for positionals.
+- When an extractor provides per-option docs, populate `inputSchema.properties.<param>.description` for better tool-call UX.
 ---
 
 ## 2026-01-26 12:43:45 +0300 - US-001
@@ -106,4 +108,15 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: keep extractor logic best-effort and always preserve deterministic ordering via the `x-mcpcc.argvMapping.options[]` array.
   - Gotchas encountered: extractor should only attempt to read source files that actually exist (many tests use fake compilers that don't require real inputs).
   - Useful context: `mcp.json` property ordering is not stable (serde_json map ordering); rely on `argvMapping.options[]` ordering instead.
+---
+
+## 2026-01-26 14:42:00 +0300 - US-009
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-9.txt (use the latest file)
+- Implemented a best-effort `argp` extractor that parses `struct argp_option[]` initializers (including `OPTION_ARG_OPTIONAL`) and emits a structured `<base>` tool with deterministic `x-mcpcc.argvMapping.options[]`.
+- Added integration test coverage for structured tool generation from a sample `argp` CLI.
+- Files changed: `crates/mcpcc/src/lib.rs`, `crates/mcpcc/tests/argp.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: `argp` doc strings map cleanly onto `inputSchema.properties.<param>.description`.
+  - Gotchas encountered: if `/projects` fills up, run cargo commands with `CARGO_TARGET_DIR=/tmp/...` and free space via `cargo clean`.
+  - Useful context: extractor selection currently prefers `getopt_long` then `argp` (US-011 will adjust ordering once annotations are supported).
 ---

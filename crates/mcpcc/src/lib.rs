@@ -387,6 +387,19 @@ struct GetoptLongSpec {
     options: Vec<GetoptLongOptionSpec>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArgpOptionSpec {
+    long_name: String,
+    arg_requirement: OptionArgRequirement,
+    short: Option<char>,
+    doc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArgpSpec {
+    options: Vec<ArgpOptionSpec>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisSummary {
     pub used_libclang: bool,
@@ -569,6 +582,87 @@ fn build_getopt_long_structured_tool_json(
     })
 }
 
+fn build_argp_structured_tool_json(
+    artifacts: &ArtifactPaths,
+    spec: &ArgpSpec,
+) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    for opt in &spec.options {
+        let schema = match opt.arg_requirement {
+            OptionArgRequirement::None => serde_json::json!({ "type": "boolean" }),
+            OptionArgRequirement::Required | OptionArgRequirement::Optional => {
+                serde_json::json!({ "type": "string" })
+            }
+        };
+        let schema = if let Some(doc) = opt.doc.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty())
+        {
+            let mut obj = schema
+                .as_object()
+                .cloned()
+                .unwrap_or_else(|| serde_json::Map::new());
+            obj.insert(
+                "description".to_string(),
+                serde_json::Value::String(doc.to_string()),
+            );
+            serde_json::Value::Object(obj)
+        } else {
+            schema
+        };
+        properties.insert(opt.long_name.clone(), schema);
+    }
+    properties.insert(
+        "args".to_string(),
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "string" },
+        }),
+    );
+
+    let mut mapping_options = Vec::with_capacity(spec.options.len());
+    for opt in &spec.options {
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "param".to_string(),
+            serde_json::Value::String(opt.long_name.clone()),
+        );
+        entry.insert(
+            "long".to_string(),
+            serde_json::Value::String(format!("--{}", opt.long_name)),
+        );
+        entry.insert(
+            "arg".to_string(),
+            serde_json::Value::String(opt.arg_requirement.as_str().to_string()),
+        );
+        if let Some(short) = opt.short {
+            entry.insert(
+                "short".to_string(),
+                serde_json::Value::String(format!("-{short}")),
+            );
+            entry.insert(
+                "shortArg".to_string(),
+                serde_json::Value::String(opt.arg_requirement.as_str().to_string()),
+            );
+        }
+        mapping_options.push(serde_json::Value::Object(entry));
+    }
+
+    serde_json::json!({
+        "name": artifacts.base_name,
+        "description": format!("Run {} with structured options.", artifacts.base_name),
+        "inputSchema": {
+            "type": "object",
+            "properties": properties,
+            "additionalProperties": false,
+        },
+        "x-mcpcc": {
+            "argvMapping": {
+                "options": mapping_options,
+                "argsParam": "args",
+            },
+        },
+    })
+}
+
 pub fn build_mcp_json(
     artifacts: &ArtifactPaths,
     descriptions: &LlmToolDescriptions,
@@ -595,16 +689,29 @@ pub fn write_mcp_json_atomic(
     descriptions: &LlmToolDescriptions,
     passthrough: &[String],
 ) -> Result<AnalysisSummary, JsonWriteError> {
-    let (spec, notes) = try_extract_getopt_long_spec(passthrough);
+    let (getopt_long_spec, mut notes) = try_extract_getopt_long_spec(passthrough);
+    let (argp_spec, argp_notes) = if getopt_long_spec.is_some() {
+        (None, Vec::new())
+    } else {
+        try_extract_argp_spec(passthrough)
+    };
+    notes.extend(argp_notes);
 
     let mut analysis = AnalysisSummary::default();
     analysis.notes = notes;
-    let structured_tool = spec.as_ref().map(|spec| {
+    let structured_tool = if let Some(spec) = getopt_long_spec.as_ref() {
         analysis.extractors = vec!["getopt_long".to_string()];
         analysis.structured_tool_generated = true;
         analysis.param_count = spec.options.len() + 1;
-        build_getopt_long_structured_tool_json(artifacts, spec)
-    });
+        Some(build_getopt_long_structured_tool_json(artifacts, spec))
+    } else if let Some(spec) = argp_spec.as_ref() {
+        analysis.extractors = vec!["argp".to_string()];
+        analysis.structured_tool_generated = true;
+        analysis.param_count = spec.options.len() + 1;
+        Some(build_argp_structured_tool_json(artifacts, spec))
+    } else {
+        None
+    };
 
     let mcp_json = build_mcp_json(artifacts, descriptions, structured_tool);
     write_json_atomic(&artifacts.mcp_json_path, &mcp_json)?;
@@ -1724,6 +1831,430 @@ fn try_extract_getopt_long_spec(passthrough: &[String]) -> (Option<GetoptLongSpe
             Err(err) => {
                 notes.push(format!(
                     "getopt_long extractor failed for {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    (None, notes)
+}
+
+fn parse_argp_parse_call(source: &str) -> Option<String> {
+    const NAME: &str = "argp_parse";
+    for (idx, _) in source.match_indices(NAME) {
+        let before_ok = idx == 0
+            || !source[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric());
+        if !before_ok {
+            continue;
+        }
+        let after_idx = idx + NAME.len();
+        let after_ok = after_idx == source.len()
+            || !source[after_idx..]
+                .chars()
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric());
+        if !after_ok {
+            continue;
+        }
+
+        let mut cursor = after_idx;
+        while let Some(ch) = source[cursor..].chars().next() {
+            if ch.is_whitespace() {
+                cursor += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if !source[cursor..].starts_with('(') {
+            continue;
+        }
+
+        let close = find_matching_delimiter(source, cursor, '(', ')')?;
+        let inner = &source[(cursor + 1)..close];
+        let args = split_top_level(inner, ',');
+        let first = args.first()?;
+        let argp_ident = parse_c_identifier(first)?;
+        return Some(argp_ident);
+    }
+    None
+}
+
+fn parse_struct_argp_options_ident(source: &str, ident: &str) -> Result<String, String> {
+    const NEEDLE: &str = "struct argp";
+    for (idx, _) in source.match_indices(NEEDLE) {
+        let after = idx + NEEDLE.len();
+        if source[after..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let mut cursor = after;
+        while let Some(ch) = source[cursor..].chars().next() {
+            if ch.is_whitespace() {
+                cursor += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if source[cursor..].starts_with('*') {
+            cursor += 1;
+            while let Some(ch) = source[cursor..].chars().next() {
+                if ch.is_whitespace() {
+                    cursor += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if !source[cursor..].starts_with(ident) {
+            continue;
+        }
+        let after_ident = cursor + ident.len();
+        if source[after_ident..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+
+        let eq_pos = source[after_ident..]
+            .find('=')
+            .map(|p| after_ident + p)
+            .ok_or_else(|| format!("struct argp {ident} missing '='"))?;
+        let brace_pos = source[eq_pos..]
+            .find('{')
+            .map(|p| eq_pos + p)
+            .ok_or_else(|| format!("struct argp {ident} missing initializer"))?;
+
+        let close = find_matching_delimiter(source, brace_pos, '{', '}')
+            .ok_or_else(|| format!("struct argp {ident} has unclosed initializer"))?;
+        let inner = &source[(brace_pos + 1)..close];
+
+        let fields = split_top_level(inner, ',');
+        let first = fields
+            .first()
+            .ok_or_else(|| format!("struct argp {ident} initializer is empty"))?;
+        let options_raw = first.trim();
+        if matches!(options_raw, "0" | "NULL") {
+            return Err(format!("struct argp {ident} options pointer is null"));
+        }
+
+        let options_ident = parse_c_identifier(options_raw)
+            .ok_or_else(|| format!("struct argp {ident} options is not an identifier"))?;
+        return Ok(options_ident);
+    }
+
+    Err(format!("struct argp initializer not found: {ident}"))
+}
+
+fn contains_argp_optional_flag(expr: &str) -> bool {
+    const NEEDLE: &str = "OPTION_ARG_OPTIONAL";
+    for (idx, _) in expr.match_indices(NEEDLE) {
+        let before_ok = idx == 0
+            || !expr[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric());
+        if !before_ok {
+            continue;
+        }
+        let after_idx = idx + NEEDLE.len();
+        let after_ok = after_idx == expr.len()
+            || !expr[after_idx..]
+                .chars()
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_struct_argp_option_array(
+    source: &str,
+    ident: &str,
+) -> Result<Vec<ArgpOptionSpec>, String> {
+    const NEEDLE: &str = "struct argp_option";
+    for (idx, _) in source.match_indices(NEEDLE) {
+        let after = idx + NEEDLE.len();
+        let mut cursor = after;
+        while let Some(ch) = source[cursor..].chars().next() {
+            if ch.is_whitespace() {
+                cursor += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if source[cursor..].starts_with('*') {
+            cursor += 1;
+            while let Some(ch) = source[cursor..].chars().next() {
+                if ch.is_whitespace() {
+                    cursor += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if !source[cursor..].starts_with(ident) {
+            continue;
+        }
+        let after_ident = cursor + ident.len();
+        if source[after_ident..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+
+        let eq_pos = source[after_ident..]
+            .find('=')
+            .map(|p| after_ident + p)
+            .ok_or_else(|| format!("struct argp_option {ident} missing '='"))?;
+        let brace_pos = source[eq_pos..]
+            .find('{')
+            .map(|p| eq_pos + p)
+            .ok_or_else(|| format!("struct argp_option {ident} missing initializer"))?;
+
+        let close = find_matching_delimiter(source, brace_pos, '{', '}')
+            .ok_or_else(|| format!("struct argp_option {ident} has unclosed initializer"))?;
+        let inner = &source[(brace_pos + 1)..close];
+
+        let mut options = Vec::new();
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut in_char = false;
+        let mut escape = false;
+        let mut element_start: Option<usize> = None;
+
+        for (offset, ch) in inner.char_indices() {
+            if in_string {
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escape = true;
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            if in_char {
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escape = true;
+                    continue;
+                }
+                if ch == '\'' {
+                    in_char = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '\'' => in_char = true,
+                '{' => {
+                    depth += 1;
+                    if depth == 1 {
+                        element_start = Some(offset + 1);
+                    }
+                }
+                '}' => {
+                    if depth == 1 {
+                        if let Some(start) = element_start.take() {
+                            let element = inner[start..offset].trim();
+                            let fields = split_top_level(element, ',');
+
+                            let name_raw = fields.first().map(String::as_str).unwrap_or("0").trim();
+                            let key_raw = fields.get(1).map(String::as_str).unwrap_or("0").trim();
+                            let arg_raw = fields.get(2).map(String::as_str).unwrap_or("0").trim();
+                            let flags_raw = fields.get(3).map(String::as_str).unwrap_or("0").trim();
+                            let doc_raw = fields.get(4).map(String::as_str).unwrap_or("0").trim();
+                            let group_raw = fields.get(5).map(String::as_str).unwrap_or("0").trim();
+
+                            let terminator = matches!(name_raw, "0" | "NULL")
+                                && matches!(key_raw, "0" | "NULL")
+                                && matches!(arg_raw, "0" | "NULL")
+                                && matches!(flags_raw, "0" | "NULL")
+                                && matches!(doc_raw, "0" | "NULL")
+                                && matches!(group_raw, "0" | "NULL");
+                            if terminator {
+                                break;
+                            }
+
+                            if matches!(name_raw, "0" | "NULL") {
+                                continue;
+                            }
+
+                            let long_name =
+                                parse_c_string_literal_expr(name_raw).ok_or_else(|| {
+                                    "argp option name is not a string literal".to_string()
+                                })?;
+                            if long_name.chars().any(char::is_whitespace) {
+                                return Err(format!(
+                                    "argp option name contains whitespace: {long_name}"
+                                ));
+                            }
+
+                            let short = match key_raw {
+                                "0" | "NULL" => None,
+                                _ => Some(parse_c_char_literal(key_raw).ok_or_else(|| {
+                                    format!("argp option key for {long_name} is not a char literal")
+                                })?),
+                            };
+
+                            let has_arg = match arg_raw {
+                                "0" | "NULL" => false,
+                                _ => parse_c_string_literal_expr(arg_raw)
+                                    .ok_or_else(|| {
+                                        format!("argp option arg for {long_name} is not a string literal")
+                                    })
+                                    .map(|_| true)?,
+                            };
+                            let optional_arg = contains_argp_optional_flag(flags_raw);
+                            let arg_requirement = if optional_arg {
+                                OptionArgRequirement::Optional
+                            } else if has_arg {
+                                OptionArgRequirement::Required
+                            } else {
+                                OptionArgRequirement::None
+                            };
+
+                            let doc = match doc_raw {
+                                "0" | "NULL" => None,
+                                _ => Some(parse_c_string_literal_expr(doc_raw).ok_or_else(|| {
+                                    format!("argp option doc for {long_name} is not a string literal")
+                                })?),
+                            };
+
+                            options.push(ArgpOptionSpec {
+                                long_name,
+                                arg_requirement,
+                                short,
+                                doc,
+                            });
+                        }
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+
+        return Ok(options);
+    }
+
+    Err(format!("struct argp_option array not found: {ident}"))
+}
+
+fn parse_any_struct_argp_option_array(
+    source: &str,
+) -> Result<(String, Vec<ArgpOptionSpec>), String> {
+    const NEEDLE: &str = "struct argp_option";
+    for (idx, _) in source.match_indices(NEEDLE) {
+        let after = idx + NEEDLE.len();
+        let mut cursor = after;
+        while let Some(ch) = source[cursor..].chars().next() {
+            if ch.is_whitespace() {
+                cursor += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if source[cursor..].starts_with('*') {
+            cursor += 1;
+            while let Some(ch) = source[cursor..].chars().next() {
+                if ch.is_whitespace() {
+                    cursor += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let ident = match parse_c_identifier(&source[cursor..]) {
+            Some(v) => v,
+            None => continue,
+        };
+        match parse_struct_argp_option_array(source, &ident) {
+            Ok(options) if !options.is_empty() => return Ok((ident, options)),
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+
+    Err("struct argp_option array not found".to_string())
+}
+
+fn extract_argp_spec_from_file(path: &Path) -> Result<ArgpSpec, String> {
+    let raw =
+        std::fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    let source = strip_c_comments(&raw);
+
+    if let Some(argp_ident) = parse_argp_parse_call(&source) {
+        if let Ok(options_ident) = parse_struct_argp_options_ident(&source, &argp_ident) {
+            if let Ok(options) = parse_struct_argp_option_array(&source, &options_ident) {
+                if !options.is_empty() {
+                    return Ok(ArgpSpec { options });
+                }
+            }
+        }
+    }
+
+    let (_ident, options) = parse_any_struct_argp_option_array(&source)?;
+    if options.is_empty() {
+        return Err("no struct argp_option entries found".to_string());
+    }
+    Ok(ArgpSpec { options })
+}
+
+fn try_extract_argp_spec(passthrough: &[String]) -> (Option<ArgpSpec>, Vec<String>) {
+    let mut notes = Vec::new();
+    let candidates: Vec<PathBuf> = passthrough
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .map(PathBuf::from)
+        .filter(|path| {
+            if !path.exists() {
+                return false;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default();
+            matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C")
+        })
+        .collect();
+
+    for path in candidates {
+        match extract_argp_spec_from_file(&path) {
+            Ok(spec) => {
+                notes.push(format!("argp extracted from {}", path.display()));
+                return (Some(spec), notes);
+            }
+            Err(err) => {
+                notes.push(format!(
+                    "argp extractor failed for {}: {err}",
                     path.display()
                 ));
             }
