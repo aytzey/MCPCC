@@ -14,6 +14,9 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - LLM is `required` by default; tests can use `--mcpcc-llm-mode=best-effort` (or `off` with `MCPCC_ALLOW_NO_LLM=1`) to avoid OpenRouter requirements.
 - For LLM integration tests, point `MCPCC_OPENROUTER_BASE_URL` at a local mock server and set `--mcpcc-cache-dir` to a temp dir to avoid global cache/network.
 - Structured tool extraction is best-effort; failures should be recorded in manifest `analysis.notes` and only printed under `--mcpcc-verbose`.
+- Tool base names are normalized to `[a-zA-Z0-9._-]` and truncated to 120 chars so `<base>.run_raw` stays within 128 characters.
+- `mcp.json` always includes `tool.x-mcpcc.exec` defaults (`timeoutMs=30000`, `maxStdoutBytes=maxStderrBytes=1048576`); tool annotations can override.
+- Extractor preference is: annotations (merge) > `argp` > `getopt_long` > fallback-only (`<base>.run_raw`).
 - Structured tools embed argv mapping metadata in `tool.x-mcpcc.argvMapping` with deterministic `options[]` ordering and an `argsParam` for positionals.
 - When an extractor provides per-option docs, populate `inputSchema.properties.<param>.description` for better tool-call UX.
 - In `mcpcc_annot.h`, use a `MCPCC_CONCAT()` helper so `__COUNTER__` expands when token-pasting; otherwise GCC may treat it literally and cause symbol redefinition.
@@ -134,4 +137,16 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: keep annotations best-effort (invalid/non-ELF binaries should add notes but must not fail builds/tests).
   - Gotchas encountered: `__COUNTER__` needs a concat helper macro to expand under token-pasting, and real `cc` builds need the output directory created beforehand.
   - Useful context: annotation-only param specs now generate a structured `<base>` tool even when no `argp`/`getopt_long` patterns exist in sources.
+---
+
+## 2026-01-26 15:38:23 +0300 - US-011
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-11.txt (use the latest file)
+- Updated structured-tool selection to prefer `argp` over `getopt_long`, with annotations still merging deterministically over extractor output.
+- Ensured every `mcp.json` tool has `x-mcpcc.exec` defaults and tool names are normalized to `[a-zA-Z0-9._-]` with max length 128.
+- Added/updated tests for exec defaults, tool-name normalization, and extractor preference when both patterns exist.
+- Files changed: `crates/mcpcc/src/lib.rs`, `crates/mcpcc/tests/annotations.rs`, `crates/mcpcc/tests/argp.rs`, `crates/mcpcc/tests/getopt_long.rs`, `crates/mcpcc/tests/mcp_json.rs`, `crates/mcpcc/tests/extractor_order.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: `tool.x-mcpcc.exec` is now always present (defaults: 30s timeout, 1MiB stdout/stderr) so servers can enforce limits consistently.
+  - Gotchas encountered: tool names derived from output filenames may contain spaces/UTF-8; normalize to meet MCP name constraints and keep `<base>.run_raw` ≤ 128 chars.
+  - Useful context: extractor preference is now `argp` before `getopt_long`; use a combined-source test to lock the ordering.
 ---

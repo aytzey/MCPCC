@@ -203,10 +203,24 @@ int main(void) { return 0; }
     assert_eq!(output.get("short").and_then(|v| v.as_str()), Some("-o"));
     assert_eq!(output.get("arg").and_then(|v| v.as_str()), Some("required"));
 
-    tools
+    let run_raw = tools
         .iter()
         .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("cli.run_raw"))
         .expect("fallback tool cli.run_raw");
+    let exec = run_raw
+        .get("x-mcpcc")
+        .and_then(|v| v.get("exec"))
+        .and_then(|v| v.as_object())
+        .expect("fallback tool must have x-mcpcc.exec object");
+    assert_eq!(exec.get("timeoutMs").and_then(|v| v.as_i64()), Some(30000));
+    assert_eq!(
+        exec.get("maxStdoutBytes").and_then(|v| v.as_i64()),
+        Some(1048576)
+    );
+    assert_eq!(
+        exec.get("maxStderrBytes").and_then(|v| v.as_i64()),
+        Some(1048576)
+    );
 }
 
 #[test]
@@ -283,6 +297,20 @@ int main(int argc, char **argv) {
         .iter()
         .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("cli"))
         .expect("structured tool cli");
+    let exec = structured
+        .get("x-mcpcc")
+        .and_then(|v| v.get("exec"))
+        .and_then(|v| v.as_object())
+        .expect("structured tool must have x-mcpcc.exec object");
+    assert_eq!(exec.get("timeoutMs").and_then(|v| v.as_i64()), Some(30000));
+    assert_eq!(
+        exec.get("maxStdoutBytes").and_then(|v| v.as_i64()),
+        Some(1048576)
+    );
+    assert_eq!(
+        exec.get("maxStderrBytes").and_then(|v| v.as_i64()),
+        Some(1048576)
+    );
 
     assert_eq!(
         structured.get("description").and_then(|v| v.as_str()),

@@ -413,6 +413,50 @@ pub struct AnalysisSummary {
 const MCPCC_ANNOT_SECTION: &str = ".mcpcc";
 const MCPCC_TOOL_PREFIX: &str = "MCPCC_TOOL:";
 const MCPCC_PARAM_PREFIX: &str = "MCPCC_PARAM:";
+const TOOL_NAME_MAX_LEN: usize = 128;
+const TOOL_RUN_RAW_SUFFIX: &str = ".run_raw";
+const TOOL_BASE_MAX_LEN: usize = TOOL_NAME_MAX_LEN - TOOL_RUN_RAW_SUFFIX.len();
+
+const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_EXEC_MAX_STDOUT_BYTES: u64 = 1_048_576;
+const DEFAULT_EXEC_MAX_STDERR_BYTES: u64 = 1_048_576;
+
+fn normalize_tool_base_name(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.trim().chars() {
+        if out.len() >= TOOL_BASE_MAX_LEN {
+            break;
+        }
+        if matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+
+    if out.is_empty() {
+        "tool".to_string()
+    } else {
+        out
+    }
+}
+
+fn run_raw_tool_name_from_base(base: &str) -> String {
+    format!("{base}{TOOL_RUN_RAW_SUFFIX}")
+}
+
+fn normalize_tool_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(base) = trimmed.strip_suffix(TOOL_RUN_RAW_SUFFIX) {
+        run_raw_tool_name_from_base(&normalize_tool_base_name(base))
+    } else {
+        normalize_tool_base_name(trimmed)
+    }
+}
+
+fn tool_base_name_for_artifacts(artifacts: &ArtifactPaths) -> String {
+    normalize_tool_base_name(&artifacts.base_name)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolAnnotation {
@@ -523,7 +567,8 @@ fn build_run_raw_tool_json(
     artifacts: &ArtifactPaths,
     descriptions: &LlmToolDescriptions,
 ) -> serde_json::Value {
-    let tool_name = format!("{}.run_raw", artifacts.base_name);
+    let base_name = tool_base_name_for_artifacts(artifacts);
+    let tool_name = run_raw_tool_name_from_base(&base_name);
     let argv_description = descriptions
         .params
         .get("argv")
@@ -552,6 +597,7 @@ fn build_getopt_long_structured_tool_json(
     artifacts: &ArtifactPaths,
     spec: &GetoptLongSpec,
 ) -> serde_json::Value {
+    let base_name = tool_base_name_for_artifacts(artifacts);
     let mut properties = serde_json::Map::new();
     for opt in &spec.options {
         let schema = match opt.long_arg {
@@ -601,8 +647,8 @@ fn build_getopt_long_structured_tool_json(
     }
 
     serde_json::json!({
-        "name": artifacts.base_name,
-        "description": format!("Run {} with structured options.", artifacts.base_name),
+        "name": base_name,
+        "description": format!("Run {} with structured options.", base_name),
         "inputSchema": {
             "type": "object",
             "properties": properties,
@@ -621,6 +667,7 @@ fn build_argp_structured_tool_json(
     artifacts: &ArtifactPaths,
     spec: &ArgpSpec,
 ) -> serde_json::Value {
+    let base_name = tool_base_name_for_artifacts(artifacts);
     let mut properties = serde_json::Map::new();
     for opt in &spec.options {
         let schema = match opt.arg_requirement {
@@ -682,8 +729,8 @@ fn build_argp_structured_tool_json(
     }
 
     serde_json::json!({
-        "name": artifacts.base_name,
-        "description": format!("Run {} with structured options.", artifacts.base_name),
+        "name": base_name,
+        "description": format!("Run {} with structured options.", base_name),
         "inputSchema": {
             "type": "object",
             "properties": properties,
@@ -709,14 +756,60 @@ pub fn build_mcp_json(
     }
     tools.push(build_run_raw_tool_json(artifacts, descriptions));
 
-    serde_json::json!({
+    let mut mcp_json = serde_json::json!({
         "mcpccVersion": env!("CARGO_PKG_VERSION"),
         "mcpSpecVersion": MCP_SPEC_VERSION,
         "binary": {
             "path": artifacts.bin_path.to_string_lossy(),
         },
         "tools": tools,
-    })
+    });
+
+    ensure_default_exec_limits(&mut mcp_json);
+
+    mcp_json
+}
+
+fn ensure_default_exec_limits(mcp_json: &mut serde_json::Value) {
+    let Some(tools) = mcp_json.get_mut("tools").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+
+    for tool in tools {
+        let Some(obj) = tool.as_object_mut() else {
+            continue;
+        };
+
+        let x_mcpcc = obj
+            .entry("x-mcpcc".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !x_mcpcc.is_object() {
+            *x_mcpcc = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let x_obj = x_mcpcc.as_object_mut().expect("x-mcpcc object");
+
+        let exec = x_obj
+            .entry("exec".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !exec.is_object() {
+            *exec = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let exec_obj = exec.as_object_mut().expect("exec object");
+
+        exec_obj.entry("timeoutMs".to_string()).or_insert_with(|| {
+            serde_json::Value::Number(serde_json::Number::from(DEFAULT_EXEC_TIMEOUT_MS))
+        });
+        exec_obj
+            .entry("maxStdoutBytes".to_string())
+            .or_insert_with(|| {
+                serde_json::Value::Number(serde_json::Number::from(DEFAULT_EXEC_MAX_STDOUT_BYTES))
+            });
+        exec_obj
+            .entry("maxStderrBytes".to_string())
+            .or_insert_with(|| {
+                serde_json::Value::Number(serde_json::Number::from(DEFAULT_EXEC_MAX_STDERR_BYTES))
+            });
+    }
 }
 
 fn non_empty_string(value: &serde_json::Value) -> Option<String> {
@@ -776,10 +869,11 @@ fn parse_tool_annotation_json(payload: &str) -> Result<ToolAnnotation, String> {
         .as_object()
         .ok_or_else(|| "tool annotation must be a JSON object".to_string())?;
 
-    let name = obj
+    let name_raw = obj
         .get("name")
         .and_then(non_empty_string)
         .ok_or_else(|| "tool annotation missing required string field: name".to_string())?;
+    let name = normalize_tool_name(&name_raw);
 
     Ok(ToolAnnotation {
         name,
@@ -798,10 +892,11 @@ fn parse_param_annotation_json(payload: &str) -> Result<ParamAnnotation, String>
         .as_object()
         .ok_or_else(|| "param annotation must be a JSON object".to_string())?;
 
-    let tool = obj
+    let tool_raw = obj
         .get("tool")
         .and_then(non_empty_string)
         .ok_or_else(|| "param annotation missing required string field: tool".to_string())?;
+    let tool = normalize_tool_name(&tool_raw);
     let property = obj
         .get("property")
         .and_then(non_empty_string)
@@ -1181,6 +1276,7 @@ fn build_annotation_structured_tool_json(
     artifacts: &ArtifactPaths,
     params: &[ParamAnnotation],
 ) -> serde_json::Value {
+    let base_name = tool_base_name_for_artifacts(artifacts);
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
 
@@ -1275,8 +1371,8 @@ fn build_annotation_structured_tool_json(
     }
 
     serde_json::json!({
-        "name": artifacts.base_name,
-        "description": format!("Run {} with structured options.", artifacts.base_name),
+        "name": base_name,
+        "description": format!("Run {} with structured options.", base_name),
         "inputSchema": serde_json::Value::Object(input_schema),
         "x-mcpcc": {
             "argvMapping": {
@@ -1301,30 +1397,31 @@ pub fn write_mcp_json_atomic(
     descriptions: &LlmToolDescriptions,
     passthrough: &[String],
 ) -> Result<AnalysisSummary, JsonWriteError> {
-    let (getopt_long_spec, mut notes) = try_extract_getopt_long_spec(passthrough);
-    let (argp_spec, argp_notes) = if getopt_long_spec.is_some() {
+    let (argp_spec, mut notes) = try_extract_argp_spec(passthrough);
+    let (getopt_long_spec, getopt_long_notes) = if argp_spec.is_some() {
         (None, Vec::new())
     } else {
-        try_extract_argp_spec(passthrough)
+        try_extract_getopt_long_spec(passthrough)
     };
-    notes.extend(argp_notes);
+    notes.extend(getopt_long_notes);
 
     let annotations = read_mcpcc_annotations(&artifacts.bin_path);
     notes.extend(annotations.notes.iter().cloned());
+    let tool_base_name = tool_base_name_for_artifacts(artifacts);
 
     let mut analysis = AnalysisSummary::default();
     analysis.notes = notes;
 
-    let mut structured_tool = if let Some(spec) = getopt_long_spec.as_ref() {
-        analysis.extractors = vec!["getopt_long".to_string()];
-        analysis.structured_tool_generated = true;
-        analysis.param_count = spec.options.len() + 1;
-        Some(build_getopt_long_structured_tool_json(artifacts, spec))
-    } else if let Some(spec) = argp_spec.as_ref() {
+    let mut structured_tool = if let Some(spec) = argp_spec.as_ref() {
         analysis.extractors = vec!["argp".to_string()];
         analysis.structured_tool_generated = true;
         analysis.param_count = spec.options.len() + 1;
         Some(build_argp_structured_tool_json(artifacts, spec))
+    } else if let Some(spec) = getopt_long_spec.as_ref() {
+        analysis.extractors = vec!["getopt_long".to_string()];
+        analysis.structured_tool_generated = true;
+        analysis.param_count = spec.options.len() + 1;
+        Some(build_getopt_long_structured_tool_json(artifacts, spec))
     } else {
         None
     };
@@ -1333,7 +1430,7 @@ pub fn write_mcp_json_atomic(
         let param_annotations: Vec<ParamAnnotation> = annotations
             .params
             .iter()
-            .filter(|a| a.tool == artifacts.base_name)
+            .filter(|a| a.tool == tool_base_name)
             .cloned()
             .collect();
         if !param_annotations.is_empty() {
@@ -1342,6 +1439,7 @@ pub fn write_mcp_json_atomic(
                 &param_annotations,
             ));
             analysis.structured_tool_generated = true;
+            analysis.param_count = param_annotations.len() + 1;
             analysis.extractors = vec!["annotation".to_string()];
         }
     }
@@ -1352,7 +1450,7 @@ pub fn write_mcp_json_atomic(
         analysis.extractors.insert(0, "annotation".to_string());
     }
     if analysis.structured_tool_generated {
-        if let Some(param_count) = count_tool_param_count(&mcp_json, &artifacts.base_name) {
+        if let Some(param_count) = count_tool_param_count(&mcp_json, &tool_base_name) {
             analysis.param_count = param_count;
         }
     }
@@ -1622,8 +1720,10 @@ fn default_cache_dir() -> PathBuf {
 }
 
 fn run_raw_analysis_summary_json(base_name: &str) -> String {
+    let base_name = normalize_tool_base_name(base_name);
+    let run_raw_name = run_raw_tool_name_from_base(&base_name);
     serde_json::json!({
-        "toolName": format!("{base_name}.run_raw"),
+        "toolName": run_raw_name,
         "params": ["argv"],
     })
     .to_string()

@@ -40,6 +40,18 @@ fn write_exe(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
     path
 }
 
+fn is_valid_tool_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 128 {
+        return false;
+    }
+    name.bytes().all(|b| {
+        matches!(
+            b,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-'
+        )
+    })
+}
+
 #[test]
 fn writes_minimal_mcp_json_on_successful_link() {
     let td = TempDir::new("mcpcc-mcp-json-link");
@@ -137,6 +149,20 @@ exit 0
             .is_some(),
         "fallback tool must have a non-null inputSchema object"
     );
+    let exec = tool
+        .get("x-mcpcc")
+        .and_then(|v| v.get("exec"))
+        .and_then(|v| v.as_object())
+        .expect("fallback tool must have x-mcpcc.exec object");
+    assert_eq!(exec.get("timeoutMs").and_then(|v| v.as_i64()), Some(30000));
+    assert_eq!(
+        exec.get("maxStdoutBytes").and_then(|v| v.as_i64()),
+        Some(1048576)
+    );
+    assert_eq!(
+        exec.get("maxStderrBytes").and_then(|v| v.as_i64()),
+        Some(1048576)
+    );
 
     for entry in std::fs::read_dir(td.path.join("bin")).expect("read dir") {
         let entry = entry.expect("entry");
@@ -205,6 +231,87 @@ exit 0
         llm.get("error").and_then(|v| v.as_str()).is_some(),
         "manifest must record placeholder reason"
     );
+}
+
+#[test]
+fn tool_names_are_sanitized_and_limited() {
+    let td = TempDir::new("mcpcc-tool-names");
+    let cache_dir = td.path.join("cache");
+    let cc_path = write_exe(
+        &td.path,
+        "fakecc",
+        br#"#!/bin/sh
+set -eu
+out="a.out"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out="$a"
+    prev=""
+    continue
+  fi
+  case "$a" in
+    -o)
+      prev="-o"
+      ;;
+    -o*)
+      out="${a#-o}"
+      ;;
+  esac
+done
+mkdir -p "$(dirname "$out")"
+: > "$out"
+exit 0
+"#,
+    );
+
+    let bin = env!("CARGO_BIN_EXE_mcpcc");
+    let out = Command::new(bin)
+        .current_dir(&td.path)
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("MCPCC_OPENROUTER_BASE_URL")
+        .arg("--mcpcc-cc")
+        .arg(&cc_path)
+        .arg("--mcpcc-llm-mode")
+        .arg("best-effort")
+        .arg("--mcpcc-cache-dir")
+        .arg(&cache_dir)
+        .arg("--")
+        .arg("hello.c")
+        .arg("-o")
+        .arg("bin/hello world")
+        .output()
+        .expect("run mcpcc");
+    assert!(
+        out.status.success(),
+        "expected exit 0, got: {:?}\nstdout: {}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mcp_json_path = td.path.join("bin/hello world.mcp.json");
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&mcp_json_path).expect("read mcp json"))
+            .expect("parse json");
+
+    let tools = v
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .expect("tools array");
+
+    let mut saw_sanitized = false;
+    for tool in tools {
+        let name = tool
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("tool name");
+        assert!(is_valid_tool_name(name), "invalid tool name: {name}");
+        if name == "hello_world.run_raw" {
+            saw_sanitized = true;
+        }
+    }
+    assert!(saw_sanitized, "expected hello_world.run_raw tool");
 }
 
 #[test]
