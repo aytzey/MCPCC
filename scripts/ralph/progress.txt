@@ -6,6 +6,7 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - Run `cargo fmt --all --check && cargo test && cargo check` before committing.
 - For integration tests, run binaries via `env!("CARGO_BIN_EXE_<bin>")` instead of shelling out to `cargo run`.
 - For compiler-invocation tests, point `--mcpcc-cc` at a temp-dir shell-script "fake compiler" to assert argv + exit-code behavior.
+- When integration tests invoke `mcpcc`, set `Command::current_dir` to a temp dir so generated artifacts don't pollute the repo.
 - Use `mcpcc::plan_artifacts()` to detect link vs compile-only and compute deterministic artifact paths (with wrapper overrides).
 ---
 
@@ -49,4 +50,16 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: use `mcpcc::plan_artifacts()` to compute `bin_path` + artifact paths; it returns `None` for compile-only (`-c`, `-E`, `-S`, `-shared`) invocations.
   - Gotchas encountered: default link output is `./a.out`, and artifact filenames are based on the binary file name (including extension, e.g. `a.out.mcp.json`).
   - Useful context: wrapper supports `--mcpcc-artifacts-dir` plus per-artifact overrides (`--mcpcc-mcp-json-out`, `--mcpcc-server-out`, `--mcpcc-manifest-out`).
+---
+
+## 2026-01-26 13:22:13 +0300 - US-005
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-5.txt (use the latest file)
+- Implemented minimal `mcp.json` generation on successful executable link (includes `mcpccVersion`, `mcpSpecVersion=2025-11-25`, `binary.path`, and non-empty `tools[]` with `<base>.run_raw` fallback tool).
+- Implemented atomic write for `mcp.json` (temp file, JSON parse validation, rename).
+- Added integration tests to verify `mcp.json` output and skip behavior for compile-only and compiler failures.
+- Files changed: `crates/mcpcc/Cargo.toml`, `Cargo.lock`, `crates/mcpcc/src/lib.rs`, `crates/mcpcc/src/main.rs`, `crates/mcpcc/tests/mcp_json.rs`, `crates/mcpcc/tests/passthrough.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: keep `mcp.json` generation logic in `crates/mcpcc/src/lib.rs` so it can be unit/integration tested independently of `main`.
+  - Gotchas encountered: `mcpcc` now writes artifacts on successful link by default; existing tests must run in a temp `current_dir` to avoid creating files under `crates/mcpcc/`.
+  - Useful context: `write_mcp_json_atomic()` uses a hidden `.mcpcc-tmp-*` file in the destination directory and cleans it up on rename failure.
 ---

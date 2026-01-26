@@ -1,5 +1,9 @@
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const MCP_SPEC_VERSION: &str = "2025-11-25";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct WrapperFlags {
@@ -191,6 +195,106 @@ pub struct ArtifactPaths {
     pub mcp_json_path: PathBuf,
     pub server_path: PathBuf,
     pub manifest_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub enum McpJsonWriteError {
+    Io(std::io::Error),
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for McpJsonWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            McpJsonWriteError::Io(err) => write!(f, "{err}"),
+            McpJsonWriteError::Json(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for McpJsonWriteError {}
+
+impl From<std::io::Error> for McpJsonWriteError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<serde_json::Error> for McpJsonWriteError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Json(value)
+    }
+}
+
+pub fn build_minimal_mcp_json(artifacts: &ArtifactPaths) -> serde_json::Value {
+    let tool_name = format!("{}.run_raw", artifacts.base_name);
+    serde_json::json!({
+        "mcpccVersion": env!("CARGO_PKG_VERSION"),
+        "mcpSpecVersion": MCP_SPEC_VERSION,
+        "binary": {
+            "path": artifacts.bin_path.to_string_lossy(),
+        },
+        "tools": [
+            {
+                "name": tool_name,
+                "description": "Run the target binary with raw argv and return stdout/stderr/exit code.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "argv": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                        },
+                    },
+                    "required": ["argv"],
+                    "additionalProperties": false,
+                },
+            }
+        ],
+    })
+}
+
+pub fn write_mcp_json_atomic(artifacts: &ArtifactPaths) -> Result<(), McpJsonWriteError> {
+    let mcp_json = build_minimal_mcp_json(artifacts);
+    let bytes = serde_json::to_vec_pretty(&mcp_json)?;
+
+    let out_path = &artifacts.mcp_json_path;
+
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let parent_dir = out_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_nanos();
+    let pid = std::process::id();
+    let tmp_path = parent_dir.join(format!(".mcpcc-tmp-{pid}-{unique}.json"));
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+    }
+
+    let read_back = std::fs::read(&tmp_path)?;
+    let _: serde_json::Value = serde_json::from_slice(&read_back)?;
+
+    if let Err(err) = std::fs::rename(&tmp_path, out_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(McpJsonWriteError::Io(err));
+    }
+
+    Ok(())
 }
 
 pub fn plan_artifacts(wrapper: &WrapperFlags, passthrough: &[String]) -> Option<ArtifactPaths> {

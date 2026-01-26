@@ -61,6 +61,7 @@ exit 0
 
     let bin = env!("CARGO_BIN_EXE_mcpcc");
     let out = Command::new(bin)
+        .current_dir(&td.path)
         .arg("--mcpcc-cc")
         .arg(&cc_path)
         .arg("--")
@@ -92,6 +93,7 @@ fn nonzero_compiler_exit_code_is_propagated() {
 
     let bin = env!("CARGO_BIN_EXE_mcpcc");
     let out = Command::new(bin)
+        .current_dir(&td.path)
         .arg("--mcpcc-cc")
         .arg(&cc_path)
         .arg("--")

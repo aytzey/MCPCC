@@ -57,5 +57,16 @@ fn main() -> ExitCode {
         }
     };
 
-    exit_code_from_status(status)
+    if !status.success() {
+        return exit_code_from_status(status);
+    }
+
+    if let Some(artifacts) = mcpcc::plan_artifacts(&parsed.wrapper, &parsed.passthrough) {
+        if let Err(err) = mcpcc::write_mcp_json_atomic(&artifacts) {
+            eprintln!("mcpcc: failed to write mcp.json: {err}");
+            return ExitCode::from(1);
+        }
+    }
+
+    ExitCode::SUCCESS
 }
