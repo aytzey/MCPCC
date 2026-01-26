@@ -1,5 +1,26 @@
 use std::process::ExitCode;
 
+fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
+    if let Some(code) = status.code() {
+        if let Ok(code) = u8::try_from(code) {
+            return ExitCode::from(code);
+        }
+        return ExitCode::from(1);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            if let Ok(code) = u8::try_from(128 + signal) {
+                return ExitCode::from(code);
+            }
+        }
+    }
+
+    ExitCode::from(1)
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
@@ -25,6 +46,16 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    eprintln!("mcpcc: passthrough compilation not implemented yet");
-    ExitCode::from(2)
+    let status = match std::process::Command::new(&compiler)
+        .args(&parsed.passthrough)
+        .status()
+    {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("mcpcc: failed to exec {}: {err}", compiler.display());
+            return ExitCode::from(2);
+        }
+    };
+
+    exit_code_from_status(status)
 }

@@ -5,6 +5,7 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - Rust workspace lives at repo root (`Cargo.toml`) with member crates under `crates/`.
 - Run `cargo fmt --all --check && cargo test && cargo check` before committing.
 - For integration tests, run binaries via `env!("CARGO_BIN_EXE_<bin>")` instead of shelling out to `cargo run`.
+- For compiler-invocation tests, point `--mcpcc-cc` at a temp-dir shell-script "fake compiler" to assert argv + exit-code behavior.
 ---
 
 ## 2026-01-26 12:43:45 +0300 - US-001
@@ -26,4 +27,15 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: keep parse/resolve logic in `crates/mcpcc/src/lib.rs` so it can be unit-tested without mutating global env.
   - Gotchas encountered: remember `cargo fmt --all --check` enforces formatting (including trailing blank lines).
   - Useful context: `mcpcc` uses exit code 2 for wrapper usage/config errors; `--mcpcc-print-cc` exits 0 and does not compile.
+---
+
+## 2026-01-26 13:01:39 +0300 - US-003
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-3.txt
+- Implemented passthrough compilation by invoking the resolved underlying compiler with identical args and propagating exit codes.
+- Added integration tests for argv passthrough ordering, exit-code propagation, and wrapper usage error exit code.
+- Files changed: `crates/mcpcc/src/main.rs`, `crates/mcpcc/tests/passthrough.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: for passthrough behavior, validate argv + exit codes with a temp "fake compiler" script pointed to by `--mcpcc-cc`.
+  - Gotchas encountered: `cargo fmt --all` may adjust formatting after adding new test files; rerun before `--check`.
+  - Useful context: passthrough now runs before any MCP artifact generation (future stories should keep this contract).
 ---
