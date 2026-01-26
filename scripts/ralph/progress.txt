@@ -13,6 +13,7 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - `mcpcc-mcp-server` computes `<base>.mcp.json` by stripping `.mcp-server` from its executable filename (via `current_exe()`) and reading the file in the same directory.
 - `mcpcc-mcp-server` enforces MCP lifecycle `initialize` → `initialized` before serving `tools/listTools` (returns JSON-RPC error code -32002 otherwise).
 - `mcpcc-mcp-server` implements `tools/callTool` for `*.run_raw` with params `{name, arguments: {argv: string[]}}` and returns `structuredContent` fields `stdout`, `stderr`, `exitCode`, `durationMs`, `timedOut`, `truncatedStdout`, `truncatedStderr`.
+- `mcpcc-mcp-server` implements `tools/callTool` for structured tools by mapping `params.arguments` to argv via `tool.x-mcpcc.argvMapping` (and rejects unknown properties with a tool `isError=true` result when `inputSchema.additionalProperties=false`).
 - `mcpcc-mcp-server` enforces per-tool exec limits from `tool.x-mcpcc.exec` (`timeoutMs`, `maxStdoutBytes`, `maxStderrBytes`) during `tools/callTool`.
 - MCP generation errors after a successful compilation must exit with code 70.
 - Use atomic JSON writes (temp file + parse validation + rename) for both `*.mcp.json` and `*.mcpcc-manifest.json`.
@@ -189,4 +190,16 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: `tools/callTool` uses `params.name` + `params.arguments`; `*.run_raw` consumes `arguments.argv: string[]`.
   - Gotchas encountered: integration tests need chmod (`0o755`) on copied server + temp-bin scripts, otherwise spawn fails.
   - Useful context: truncation should not set `isError`; only spawn errors, timeouts, and non-zero exit codes do.
+---
+
+## 2026-01-26 17:07:55 +0300 - US-015
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-15.txt (use the latest file)
+- Implemented structured tool support in `mcpcc-mcp-server` for `tools/callTool`, mapping `params.arguments` to argv via `tool.x-mcpcc.argvMapping` and appending positionals from `argsParam`.
+- Validated `additionalProperties:false` inputs by rejecting unknown properties with `isError=true` tool results; implemented optional-arg semantics (omitted vs empty string vs non-empty).
+- Added stdio integration tests covering argv mapping order, args append behavior, optional-arg behavior, and unknown-property rejection.
+- Files changed: `crates/mcpcc-mcp-server/src/main.rs`, `crates/mcpcc-mcp-server/tests/stdio_call_tool_structured.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: structured tool calls use `tool.x-mcpcc.argvMapping.options[]` order, then `argsParam` for positionals.
+  - Gotchas encountered: enforce `inputSchema.additionalProperties=false` by checking `inputSchema.properties` keys; return a tool-result error (not JSON-RPC error) for unknown properties.
+  - Useful context: optional-arg options interpret `""` as “flag only” (emit `--opt` without a value).
 ---

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -297,31 +298,55 @@ fn handle_call_tool(
         return Ok(tool_error_result(&format!("tool not found: {tool_name}")));
     };
 
-    if !tool_name.ends_with(".run_raw") {
-        return Ok(tool_error_result(&format!(
-            "unsupported tool (only *.run_raw is implemented): {tool_name}"
-        )));
+    if tool_name.ends_with(".run_raw") {
+        let args_obj = params
+            .get("arguments")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| "invalid params (expected object): params.arguments".to_string())?;
+
+        let argv = args_obj
+            .get("argv")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "invalid params (expected array): arguments.argv".to_string())?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "invalid params (expected string): arguments.argv[]".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        return Ok(run_binary_tool(&bundle.binary_path, &argv, tool));
     }
 
+    let empty_arguments = serde_json::Map::new();
     let args_obj = params
         .get("arguments")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| "invalid params (expected object): params.arguments".to_string())?;
+        .unwrap_or(&empty_arguments);
 
-    let argv = args_obj
-        .get("argv")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "invalid params (expected array): arguments.argv".to_string())?
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| "invalid params (expected string): arguments.argv[]".to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    match argv_from_structured_tool_call(tool, args_obj) {
+        Ok(argv) => Ok(run_binary_tool(&bundle.binary_path, &argv, tool)),
+        Err(msg) => Ok(tool_error_result(&msg)),
+    }
+}
 
+fn find_tool<'a>(bundle: &'a McpJsonBundle, name: &str) -> Option<&'a serde_json::Value> {
+    bundle.tools.iter().find(|tool| {
+        tool.as_object()
+            .and_then(|obj| obj.get("name"))
+            .and_then(|v| v.as_str())
+            == Some(name)
+    })
+}
+
+fn run_binary_tool(
+    binary_path: &str,
+    argv: &[String],
+    tool: &serde_json::Value,
+) -> serde_json::Value {
     let limits = tool_exec_limits(tool);
-    let outcome = run_raw_binary(&bundle.binary_path, &argv, limits);
+    let outcome = run_raw_binary(binary_path, argv, limits);
 
     let summary = if let Some(err) = &outcome.spawn_error {
         format!("spawn error: {err}")
@@ -331,7 +356,7 @@ fn handle_call_tool(
         format!("exitCode={}", outcome.exit_code)
     };
 
-    Ok(serde_json::json!({
+    serde_json::json!({
         "content": [{ "type": "text", "text": summary }],
         "structuredContent": {
             "stdout": String::from_utf8_lossy(&outcome.stdout).to_string(),
@@ -343,16 +368,190 @@ fn handle_call_tool(
             "truncatedStderr": outcome.truncated_stderr,
         },
         "isError": outcome.is_error,
-    }))
+    })
 }
 
-fn find_tool<'a>(bundle: &'a McpJsonBundle, name: &str) -> Option<&'a serde_json::Value> {
-    bundle.tools.iter().find(|tool| {
-        tool.as_object()
-            .and_then(|obj| obj.get("name"))
+fn argv_from_structured_tool_call(
+    tool: &serde_json::Value,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<String>, String> {
+    let enforce_additional_properties = tool
+        .get("inputSchema")
+        .and_then(|v| v.get("additionalProperties"))
+        .and_then(|v| v.as_bool())
+        == Some(false);
+
+    if enforce_additional_properties {
+        let Some(props) = tool
+            .get("inputSchema")
+            .and_then(|v| v.get("properties"))
+            .and_then(|v| v.as_object())
+        else {
+            return Err(
+                "tool inputSchema.properties missing (cannot validate additionalProperties:false)"
+                    .to_string(),
+            );
+        };
+
+        let allowed: HashSet<&str> = props.keys().map(String::as_str).collect();
+        for key in arguments.keys() {
+            if !allowed.contains(key.as_str()) {
+                return Err(format!("unknown argument property: {key}"));
+            }
+        }
+    }
+
+    if let Some(required) = tool
+        .get("inputSchema")
+        .and_then(|v| v.get("required"))
+        .and_then(|v| v.as_array())
+    {
+        for entry in required {
+            let Some(key) = entry.as_str() else {
+                continue;
+            };
+            if !arguments.contains_key(key) {
+                return Err(format!("missing required argument property: {key}"));
+            }
+        }
+    }
+
+    let mapping = tool
+        .get("x-mcpcc")
+        .and_then(|v| v.get("argvMapping"))
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| "tool missing x-mcpcc.argvMapping".to_string())?;
+
+    let options = mapping
+        .get("options")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "tool missing x-mcpcc.argvMapping.options".to_string())?;
+
+    let args_param = mapping
+        .get("argsParam")
+        .and_then(|v| v.as_str())
+        .unwrap_or("args");
+
+    let mut argv = Vec::new();
+
+    for opt in options {
+        let Some(opt_obj) = opt.as_object() else {
+            return Err("invalid x-mcpcc.argvMapping.options entry (expected object)".to_string());
+        };
+
+        let param = opt_obj
+            .get("param")
             .and_then(|v| v.as_str())
-            == Some(name)
-    })
+            .ok_or_else(|| {
+                "invalid x-mcpcc.argvMapping.options entry: missing param".to_string()
+            })?;
+
+        let Some(value) = arguments.get(param) else {
+            continue;
+        };
+
+        let repeatable = opt_obj
+            .get("repeatable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let (flag, arg_requirement) =
+            if let Some(long) = opt_obj.get("long").and_then(|v| v.as_str()) {
+                let arg = opt_obj
+                    .get("arg")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none");
+                (long, arg)
+            } else if let Some(short) = opt_obj.get("short").and_then(|v| v.as_str()) {
+                let arg = opt_obj
+                    .get("shortArg")
+                    .or_else(|| opt_obj.get("arg"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none");
+                (short, arg)
+            } else {
+                return Err(format!(
+                    "invalid x-mcpcc.argvMapping.options entry for {param}: missing long/short"
+                ));
+            };
+
+        if repeatable {
+            if let Some(values) = value.as_array() {
+                for entry in values {
+                    apply_option_value(&mut argv, param, flag, arg_requirement, entry)?;
+                }
+            } else {
+                apply_option_value(&mut argv, param, flag, arg_requirement, value)?;
+            }
+        } else {
+            apply_option_value(&mut argv, param, flag, arg_requirement, value)?;
+        }
+    }
+
+    if let Some(value) = arguments.get(args_param) {
+        let Some(values) = value.as_array() else {
+            return Err(format!(
+                "invalid arguments (expected array): arguments.{args_param}"
+            ));
+        };
+        for entry in values {
+            let Some(arg) = entry.as_str() else {
+                return Err(format!(
+                    "invalid arguments (expected string): arguments.{args_param}[]"
+                ));
+            };
+            argv.push(arg.to_string());
+        }
+    }
+
+    Ok(argv)
+}
+
+fn apply_option_value(
+    argv: &mut Vec<String>,
+    param: &str,
+    flag: &str,
+    arg_requirement: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    match arg_requirement {
+        "none" => {
+            let Some(enabled) = value.as_bool() else {
+                return Err(format!(
+                    "invalid arguments (expected boolean): arguments.{param}"
+                ));
+            };
+            if enabled {
+                argv.push(flag.to_string());
+            }
+            Ok(())
+        }
+        "required" => {
+            let Some(arg) = value.as_str() else {
+                return Err(format!(
+                    "invalid arguments (expected string): arguments.{param}"
+                ));
+            };
+            argv.push(flag.to_string());
+            argv.push(arg.to_string());
+            Ok(())
+        }
+        "optional" => {
+            let Some(arg) = value.as_str() else {
+                return Err(format!(
+                    "invalid arguments (expected string): arguments.{param}"
+                ));
+            };
+            argv.push(flag.to_string());
+            if !arg.is_empty() {
+                argv.push(arg.to_string());
+            }
+            Ok(())
+        }
+        other => Err(format!(
+            "invalid x-mcpcc.argvMapping.options entry for {param}: unsupported arg requirement {other}"
+        )),
+    }
 }
 
 fn tool_exec_limits(tool: &serde_json::Value) -> ExecLimits {
