@@ -110,11 +110,26 @@ fn main() -> ExitCode {
             }
         }
 
-        if let Err(err) = mcpcc::write_mcp_json_atomic(&artifacts, &descriptions) {
-            eprintln!("mcpcc: failed to write mcp.json: {err}");
-            return ExitCode::from(70);
-        }
+        let analysis =
+            match mcpcc::write_mcp_json_atomic(&artifacts, &descriptions, &parsed.passthrough) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("mcpcc: failed to write mcp.json: {err}");
+                    return ExitCode::from(70);
+                }
+            };
         if parsed.wrapper.verbose {
+            if analysis.structured_tool_generated && !analysis.extractors.is_empty() {
+                eprintln!(
+                    "mcpcc: structured tool extracted via: {}",
+                    analysis.extractors.join(",")
+                );
+            }
+            if !analysis.notes.is_empty() {
+                for note in &analysis.notes {
+                    eprintln!("mcpcc: analysis: {note}");
+                }
+            }
             eprintln!(
                 "mcpcc: wrote mcp.json: {}",
                 artifacts.mcp_json_path.display()
@@ -126,6 +141,7 @@ fn main() -> ExitCode {
             &parsed.passthrough,
             0,
             &artifacts,
+            &analysis,
             &llm_manifest,
         ) {
             eprintln!("mcpcc: failed to write manifest: {err}");

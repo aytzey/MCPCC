@@ -12,6 +12,8 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - Use atomic JSON writes (temp file + parse validation + rename) for both `*.mcp.json` and `*.mcpcc-manifest.json`.
 - LLM is `required` by default; tests can use `--mcpcc-llm-mode=best-effort` (or `off` with `MCPCC_ALLOW_NO_LLM=1`) to avoid OpenRouter requirements.
 - For LLM integration tests, point `MCPCC_OPENROUTER_BASE_URL` at a local mock server and set `--mcpcc-cache-dir` to a temp dir to avoid global cache/network.
+- Structured tool extraction is best-effort; failures should be recorded in manifest `analysis.notes` and only printed under `--mcpcc-verbose`.
+- Structured tools embed argv mapping metadata in `tool.x-mcpcc.argvMapping` with deterministic `options[]` ordering and an `argsParam` for positionals.
 ---
 
 ## 2026-01-26 12:43:45 +0300 - US-001
@@ -91,4 +93,17 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: use `MCPCC_OPENROUTER_BASE_URL` + `--mcpcc-cache-dir` to test LLM behavior without hitting real OpenRouter or global caches.
   - Gotchas encountered: builds on this runner may require setting `CARGO_TARGET_DIR` off `/projects` due to limited disk space.
   - Useful context: in `required` mode, cache miss + LLM failure causes `mcpcc` to exit 70 and skip writing MCP artifacts.
+---
+
+## 2026-01-26 14:25:13 +0300 - US-008
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-8.txt (use the latest file)
+- Implemented a best-effort `getopt_long` extractor that parses `getopt_long(..., optstring, long_options, ...)` plus the `struct option long_options[]` initializer in source files.
+- When extraction succeeds, `mcp.json` now includes a structured tool named `<base>` with `inputSchema.additionalProperties=false`, an `args: string[]` positional list, and `x-mcpcc.argvMapping.options[]` ordered to match the `long_options[]` initializer order.
+- Manifest `analysis` is now populated (extractors, structured tool flag, param count, notes) and is printed under `--mcpcc-verbose`.
+- Added integration test coverage for structured tool generation from a sample `getopt_long` CLI.
+- Files changed: `crates/mcpcc/src/lib.rs`, `crates/mcpcc/src/main.rs`, `crates/mcpcc/tests/getopt_long.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: keep extractor logic best-effort and always preserve deterministic ordering via the `x-mcpcc.argvMapping.options[]` array.
+  - Gotchas encountered: extractor should only attempt to read source files that actually exist (many tests use fake compilers that don't require real inputs).
+  - Useful context: `mcp.json` property ordering is not stable (serde_json map ordering); rely on `argvMapping.options[]` ordering instead.
 ---
