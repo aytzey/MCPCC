@@ -9,6 +9,7 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - For compiler-invocation tests, point `--mcpcc-cc` at a temp-dir shell-script "fake compiler" to assert argv + exit-code behavior.
 - When integration tests invoke `mcpcc`, set `Command::current_dir` to a temp dir so generated artifacts don't pollute the repo.
 - Use `mcpcc::plan_artifacts()` to detect link vs compile-only and compute deterministic artifact paths (with wrapper overrides).
+- `mcpcc` copies the packaged `mcpcc-mcp-server` binary (resolved next to `mcpcc`, fallback to PATH) to `<base>.mcp-server` via `mcpcc::copy_packaged_mcp_server_binary()`.
 - `mcpcc-mcp-server` computes `<base>.mcp.json` by stripping `.mcp-server` from its executable filename (via `current_exe()`) and reading the file in the same directory.
 - `mcpcc-mcp-server` enforces MCP lifecycle `initialize` → `initialized` before serving `tools/listTools` (returns JSON-RPC error code -32002 otherwise).
 - MCP generation errors after a successful compilation must exit with code 70.
@@ -163,4 +164,15 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: in tests, rename/copy the server binary to `<base>.mcp-server` in a temp dir so it resolves `<base>.mcp.json` correctly.
   - Gotchas encountered: `cargo fmt --all --check` is strict about formatting and trailing blank lines.
   - Useful context: `tools/listTools` is rejected before `initialized` with JSON-RPC code -32002.
+---
+
+## 2026-01-26 16:44:17 +0300 - US-013
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-13.txt (use the latest file)
+- Implemented per-binary server emission by copying the packaged `mcpcc-mcp-server` binary to `<base>.mcp-server` (or `--mcpcc-server-out`) on successful link.
+- Added integration tests covering copy success, override path, compile-only/failed-compiler skipping, and exit 70 on copy failure.
+- Files changed: `crates/mcpcc/src/lib.rs`, `crates/mcpcc/src/main.rs`, `crates/mcpcc/tests/server_copy.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: resolve the packaged server binary next to `mcpcc` first, then fall back to searching `PATH`.
+  - Gotchas encountered: place server copy before manifest write so manifest only exists when the server copy succeeds.
+  - Useful context: server copy failures are treated as MCP-generation failures and exit with code 70.
 ---

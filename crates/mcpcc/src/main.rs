@@ -136,6 +136,14 @@ fn main() -> ExitCode {
             );
         }
 
+        if let Err(err) = mcpcc::copy_packaged_mcp_server_binary(&artifacts.server_path) {
+            eprintln!("mcpcc: failed to copy server: {err}");
+            return ExitCode::from(70);
+        }
+        if parsed.wrapper.verbose {
+            eprintln!("mcpcc: wrote server: {}", artifacts.server_path.display());
+        }
+
         if let Err(err) = mcpcc::write_manifest_json_atomic(
             &compiler,
             &parsed.passthrough,

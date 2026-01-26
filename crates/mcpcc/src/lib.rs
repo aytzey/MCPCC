@@ -311,6 +311,37 @@ pub struct ArtifactPaths {
 }
 
 #[derive(Debug)]
+pub enum ServerCopyError {
+    CurrentExe(std::io::Error),
+    NotFound(Vec<PathBuf>),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ServerCopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerCopyError::CurrentExe(err) => write!(f, "failed to resolve current exe: {err}"),
+            ServerCopyError::NotFound(paths) => {
+                if paths.is_empty() {
+                    return write!(f, "mcpcc-mcp-server binary not found");
+                }
+                write!(f, "mcpcc-mcp-server binary not found; tried: ")?;
+                for (idx, path) in paths.iter().enumerate() {
+                    if idx > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", path.display())?;
+                }
+                Ok(())
+            }
+            ServerCopyError::Io(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for ServerCopyError {}
+
+#[derive(Debug)]
 pub enum JsonWriteError {
     Io(std::io::Error),
     Json(serde_json::Error),
@@ -3042,6 +3073,48 @@ pub fn plan_artifacts(wrapper: &WrapperFlags, passthrough: &[String]) -> Option<
         server_path,
         manifest_path,
     })
+}
+
+#[cfg(windows)]
+const PACKAGED_SERVER_BINARY_NAMES: [&str; 2] = ["mcpcc-mcp-server.exe", "mcpcc-mcp-server"];
+#[cfg(not(windows))]
+const PACKAGED_SERVER_BINARY_NAMES: [&str; 1] = ["mcpcc-mcp-server"];
+
+fn resolve_packaged_mcp_server_binary() -> Result<PathBuf, ServerCopyError> {
+    let mut searched = Vec::new();
+    let current_exe = std::env::current_exe().map_err(|err| ServerCopyError::CurrentExe(err))?;
+    if let Some(dir) = current_exe.parent() {
+        for name in PACKAGED_SERVER_BINARY_NAMES {
+            let candidate = dir.join(name);
+            searched.push(candidate.clone());
+            if is_executable(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    if let Some(path_env) = std::env::var_os("PATH") {
+        for name in PACKAGED_SERVER_BINARY_NAMES {
+            if let Some(path) = find_executable(name, Some(path_env.as_os_str())) {
+                return Ok(path);
+            }
+        }
+    }
+
+    Err(ServerCopyError::NotFound(searched))
+}
+
+pub fn copy_packaged_mcp_server_binary(out_path: &Path) -> Result<(), ServerCopyError> {
+    let src = resolve_packaged_mcp_server_binary()?;
+
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(ServerCopyError::Io)?;
+        }
+    }
+
+    std::fs::copy(src, out_path).map_err(ServerCopyError::Io)?;
+    Ok(())
 }
 
 fn should_skip_mcp_artifact_generation(passthrough: &[String]) -> bool {
