@@ -9,6 +9,8 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - For compiler-invocation tests, point `--mcpcc-cc` at a temp-dir shell-script "fake compiler" to assert argv + exit-code behavior.
 - When integration tests invoke `mcpcc`, set `Command::current_dir` to a temp dir so generated artifacts don't pollute the repo.
 - Use `mcpcc::plan_artifacts()` to detect link vs compile-only and compute deterministic artifact paths (with wrapper overrides).
+- `mcpcc-mcp-server` computes `<base>.mcp.json` by stripping `.mcp-server` from its executable filename (via `current_exe()`) and reading the file in the same directory.
+- `mcpcc-mcp-server` enforces MCP lifecycle `initialize` → `initialized` before serving `tools/listTools` (returns JSON-RPC error code -32002 otherwise).
 - MCP generation errors after a successful compilation must exit with code 70.
 - Use atomic JSON writes (temp file + parse validation + rename) for both `*.mcp.json` and `*.mcpcc-manifest.json`.
 - LLM is `required` by default; tests can use `--mcpcc-llm-mode=best-effort` (or `off` with `MCPCC_ALLOW_NO_LLM=1`) to avoid OpenRouter requirements.
@@ -149,4 +151,16 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: `tool.x-mcpcc.exec` is now always present (defaults: 30s timeout, 1MiB stdout/stderr) so servers can enforce limits consistently.
   - Gotchas encountered: tool names derived from output filenames may contain spaces/UTF-8; normalize to meet MCP name constraints and keep `<base>.run_raw` ≤ 128 chars.
   - Useful context: extractor preference is now `argp` before `getopt_long`; use a combined-source test to lock the ordering.
+---
+
+## 2026-01-26 16:29:57 +0300 - US-012
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-12.txt (use the latest file)
+- Implemented a minimal stdio MCP server (JSON-RPC 2.0) in `mcpcc-mcp-server` supporting `initialize`, `initialized`, and `tools/listTools`.
+- Server reads the adjacent `<base>.mcp.json` (derived from its renamed `<base>.mcp-server` filename) and returns `mcp.json.tools[]` via `tools/listTools`.
+- Added integration test covering lifecycle gating and tool listing over stdio.
+- Files changed: `crates/mcpcc-mcp-server/Cargo.toml`, `crates/mcpcc-mcp-server/src/main.rs`, `crates/mcpcc-mcp-server/tests/stdio_list_tools.rs`, `Cargo.lock`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: in tests, rename/copy the server binary to `<base>.mcp-server` in a temp dir so it resolves `<base>.mcp.json` correctly.
+  - Gotchas encountered: `cargo fmt --all --check` is strict about formatting and trailing blank lines.
+  - Useful context: `tools/listTools` is rejected before `initialized` with JSON-RPC code -32002.
 ---
