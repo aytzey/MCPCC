@@ -4,6 +4,7 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 ## Codebase Patterns
 - Rust workspace lives at repo root (`Cargo.toml`) with member crates under `crates/`.
 - Run `cargo fmt --all --check && cargo test && cargo check` before committing.
+- For integration tests, run binaries via `env!("CARGO_BIN_EXE_<bin>")` instead of shelling out to `cargo run`.
 ---
 
 ## 2026-01-26 12:43:45 +0300 - US-001
@@ -14,4 +15,15 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: workspace members are kept under `crates/`.
   - Gotchas encountered: `cargo fmt --all --check` will fail on extra trailing blank lines.
   - Useful context: current quality gate is `cargo fmt --all --check`, `cargo test`, `cargo check`.
+---
+
+## 2026-01-26 12:54:29 +0300 - US-002
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-2.txt
+- Implemented `mcpcc` wrapper argument parsing supporting both `--`-separated and no-`--` (`--mcpcc-*` only) modes.
+- Implemented underlying compiler resolution precedence (`--mcpcc-cc` > `MCPCC_CC` > `CC` > `clang` > `gcc`) plus `--mcpcc-print-cc`.
+- Files changed: `crates/mcpcc/src/lib.rs`, `crates/mcpcc/src/main.rs`, `crates/mcpcc/tests/print_cc.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: keep parse/resolve logic in `crates/mcpcc/src/lib.rs` so it can be unit-tested without mutating global env.
+  - Gotchas encountered: remember `cargo fmt --all --check` enforces formatting (including trailing blank lines).
+  - Useful context: `mcpcc` uses exit code 2 for wrapper usage/config errors; `--mcpcc-print-cc` exits 0 and does not compile.
 ---
