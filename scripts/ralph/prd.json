@@ -1,0 +1,268 @@
+{
+  "project": "mcpcc",
+  "branchName": "ralph/mcpcc-v1",
+  "description": "mcpcc: gcc/clang wrapper that emits an MCP tool bundle (mcp.json) and a stdio MCP server for linked executables.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Bootstrap Rust workspace and binaries",
+      "description": "As a developer, I want a Rust workspace with `mcpcc` and `mcpcc-mcp-server` binaries so that the rest of the implementation has a stable foundation.",
+      "acceptanceCriteria": [
+        "Add a Cargo workspace with two binaries: `mcpcc` and `mcpcc-mcp-server`",
+        "Binaries build successfully with `cargo build`",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Parse mcpcc wrapper flags and select underlying compiler",
+      "description": "As a CLI user, I want `mcpcc` to separate wrapper flags from compiler/linker flags and pick the correct underlying compiler so that existing build commands work unchanged.",
+      "acceptanceCriteria": [
+        "Support `mcpcc [mcpcc_flags...] -- [compiler_flags...]` and also a no-`--` mode where only `--mcpcc-*` are treated as wrapper flags",
+        "Implement compiler selection precedence: `--mcpcc-cc` > `MCPCC_CC` env > `CC` env > `clang` if available > `gcc`",
+        "Add `mcpcc --mcpcc-print-cc` to print the resolved underlying compiler path and exit 0 without compiling",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Passthrough compilation and exit-code contract",
+      "description": "As a build-system user, I want `mcpcc` to invoke the underlying compiler with identical arguments and propagate exit codes so that builds behave like plain gcc/clang.",
+      "acceptanceCriteria": [
+        "Invoke the resolved underlying compiler with the passthrough args (preserving ordering)",
+        "If the underlying compiler exits non-zero, `mcpcc` exits with the same code and does not generate MCP artifacts",
+        "Wrapper CLI usage errors exit with code 2",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Detect executable link and resolve artifact paths",
+      "description": "As a developer, I want `mcpcc` to only generate MCP artifacts when linking an executable and to compute deterministic output paths so that results are predictable and cacheable.",
+      "acceptanceCriteria": [
+        "Detect compile-only modes (`-c`, `-E`, `-S`, `-shared`) and skip MCP artifact generation for those invocations",
+        "Resolve `bin_path` from `-o <path>` or default to `./a.out` when linking",
+        "Implement default artifact naming: `base.mcp.json`, `base.mcp-server`, `base.mcpcc-manifest.json` in `dirname(bin_path)`",
+        "Support output overrides: `--mcpcc-artifacts-dir`, `--mcpcc-mcp-json-out`, `--mcpcc-server-out`, `--mcpcc-manifest-out`",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Write minimal mcp.json with required fallback tool (atomic)",
+      "description": "As an MCP client, I want every linked executable build to produce a valid tool bundle with a guaranteed raw runner tool so that the binary can always be executed via MCP.",
+      "acceptanceCriteria": [
+        "When linking an executable, write `<base>.mcp.json` containing `mcpccVersion`, `mcpSpecVersion=2025-11-25`, `binary.path`, and a non-empty `tools[]`",
+        "Always include a fallback tool named `<base>.run_raw` with a non-null JSON Schema object `inputSchema`",
+        "Use atomic write (temp file, validate JSON parse, then rename) for `mcp.json`",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Manifest, logging, and MCP-generation failure exit code",
+      "description": "As a developer, I want deterministic artifacts and actionable logs (plus a manifest) so that failures are easy to debug and CI can distinguish compilation from MCP-generation errors.",
+      "acceptanceCriteria": [
+        "Write `<base>.mcpcc-manifest.json` with compiler argv/exitCode, artifact paths, extractor/analysis metadata, and LLM metadata placeholders",
+        "Default logs are short; `--mcpcc-verbose` prints detailed decisions and artifact paths to stderr",
+        "If compilation succeeds but MCP artifact generation fails, `mcpcc` exits with code 70",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "OpenRouter LLM descriptions with cache and modes",
+      "description": "As a user, I want `mcpcc` to generate short tool/param descriptions via OpenRouter (with caching) so that MCP tools are self-describing while remaining deterministic across rebuilds.",
+      "acceptanceCriteria": [
+        "Implement `OPENROUTER_API_KEY` auth and call OpenRouter using an OpenAI-compatible API with `temperature=0`",
+        "Implement `--mcpcc-llm-mode required|best-effort|off` with default `required`; `off` is only allowed when `MCPCC_ALLOW_NO_LLM=1` is set",
+        "Cache key is SHA-256(`promptVersion` + `model` + `analysis_summary_json`) and cache files are written to `cache_dir/llm/<hash>.json`",
+        "In `required` mode, cache miss triggers an API call; API failure causes `mcpcc` to exit 70",
+        "In `best-effort` mode, missing key/API failure produces deterministic placeholder descriptions and is recorded in the manifest",
+        "Model output is strict JSON with `toolDescription` and `params` string map; enforce 5–240 char trimmed descriptions and ignore unknown keys",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "getopt_long extractor → structured tool schema + argv mapping",
+      "description": "As an MCP client, I want a structured tool for `getopt_long`-based CLIs so that arguments can be called with a JSON object instead of raw argv.",
+      "acceptanceCriteria": [
+        "Parse `struct option long_options[]` to extract long option name + has_arg (no/required/optional) and candidate short option from `val` when it is a char literal",
+        "Parse the `optstring` passed to `getopt_long` to determine short option arg requirements (`a`, `a:`, `a::`)",
+        "When extraction succeeds, generate a structured tool named `<base>` with `inputSchema.additionalProperties=false`, extracted option properties, and `args: string[]` for remaining positionals",
+        "Generate deterministic `x-mcpcc.argvMapping.options[]` ordering matching initializer order",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "argp extractor → structured tool schema + argv mapping",
+      "description": "As an MCP client, I want a structured tool for `argp`-based CLIs so that common Linux CLIs become callable with typed JSON input.",
+      "acceptanceCriteria": [
+        "Parse `struct argp_option[]` initializers to extract long name, short key (char literal), arg requirement, and doc string",
+        "Treat `OPTION_ARG_OPTIONAL` as an optional-argument option",
+        "When extraction succeeds, generate a structured tool named `<base>` with `inputSchema.additionalProperties=false`, extracted option properties, and `args: string[]` for remaining positionals",
+        "Generate deterministic `x-mcpcc.argvMapping.options[]` ordering matching initializer order",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Annotation DSL header + ELF section reader + deterministic merge",
+      "description": "As a power user, I want to override tool/param metadata deterministically via annotations so that heuristics can be corrected without changing extraction code.",
+      "acceptanceCriteria": [
+        "Add `mcpcc_annot.h` that embeds JSON strings in a `.mcpcc` section using `MCPCC_TOOL_JSON(...)` and `MCPCC_PARAM_JSON(...)` macros",
+        "Read `.mcpcc` section data from the linked executable and parse `MCPCC_TOOL:` / `MCPCC_PARAM:` JSON payloads",
+        "Merge precedence is deterministic: annotation > argp/getopt > fallback",
+        "Annotation can override tool title/description and exec limits (timeout/max stdout/stderr) and can override param mapping and descriptions",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Finalize tool bundle: structured + raw, exec defaults, schema rules",
+      "description": "As an MCP client, I want a complete and valid tool bundle that always works (raw) and is structured when possible so that tool calling is reliable.",
+      "acceptanceCriteria": [
+        "Extractor selection order is: annotations (merge) then argp then getopt_long then fallback-only",
+        "If a structured tool is generated, `mcp.json.tools[]` includes both `<base>` and `<base>.run_raw`; otherwise only `<base>.run_raw`",
+        "Set default exec limits: `timeoutMs=30000`, `maxStdoutBytes=1048576`, `maxStderrBytes=1048576` and allow annotation overrides",
+        "Ensure every tool has non-null `inputSchema` and tool names match `[a-zA-Z0-9._-]` and length 1–128",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Implement generic mcpcc-mcp-server: stdio initialize + listTools",
+      "description": "As an MCP client, I want a stdio MCP server binary that reads `*.mcp.json` and lists tools so that clients can discover available tools.",
+      "acceptanceCriteria": [
+        "Implement MCP stdio server (`stdin`/`stdout`, JSON-RPC 2.0) compatible with MCP Spec 2025-11-25 tools capability",
+        "Server reads the adjacent `<base>.mcp.json` at runtime and serves `tools/listTools` from its `tools[]` array",
+        "Server supports MCP lifecycle: `initialize` then `initialized` before serving tool calls",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "mcpcc emits the per-binary server executable (copy)",
+      "description": "As a user, I want each linked executable build to produce a runnable `<base>.mcp-server` so that I can launch an MCP server for that binary without rebuilding Rust each time.",
+      "acceptanceCriteria": [
+        "On successful executable link, copy the packaged `mcpcc-mcp-server` binary to `<base>.mcp-server` (or `--mcpcc-server-out` override)",
+        "Server copy is skipped when MCP generation is skipped (compile-only modes) or when the underlying compiler fails",
+        "Manifest records the final server path",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Server: tools/callTool for run_raw (spawn + limits + structuredContent)",
+      "description": "As an MCP client, I want to run the target binary via `<base>.run_raw` and get stdout/stderr/exitCode back so that the tool is usable in automation.",
+      "acceptanceCriteria": [
+        "Implement `tools/callTool` for `<base>.run_raw` to spawn the target binary and return `stdout`, `stderr`, `exitCode`, `durationMs`, `timedOut`, `truncatedStdout`, `truncatedStderr` in `structuredContent`",
+        "Enforce timeout and stdout/stderr byte limits (defaults from `x-mcpcc.exec`, with annotation overrides reflected in `mcp.json`)",
+        "`isError` is true on spawn error, timeout, or non-zero exit code",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Server: structured tool calling (input validation + argv mapping)",
+      "description": "As an MCP client, I want to call the structured tool with a JSON object and have it mapped deterministically to argv so that CLIs are invoked safely and predictably.",
+      "acceptanceCriteria": [
+        "Validate structured tool input objects with `additionalProperties:false` and return an `isError=true` tool result for unknown properties",
+        "Map options into argv using `x-mcpcc.argvMapping.options[]` order, then append `args[]` positionals in provided order",
+        "Optional-arg options: omitted → not emitted; empty string → emit flag only; non-empty string → emit with value",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Golden examples + end-to-end integration tests",
+      "description": "As a maintainer, I want a reproducible test suite with example C programs so that regressions in extraction, artifact generation, and server behavior are caught automatically.",
+      "acceptanceCriteria": [
+        "Add example C programs covering: argp, getopt_long, no-parser (raw only), and annotation override",
+        "Add integration tests that compile examples via `mcpcc` and verify generated `*.mcp.json`, `*.mcp-server`, and `*.mcpcc-manifest.json`",
+        "Add server integration tests that perform stdio `initialize`, `tools/listTools`, and at least one `tools/callTool` call and verify `structuredContent` fields",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Documentation (README + SPEC_mcp.json.md)",
+      "description": "As a user, I want clear documentation for `mcpcc` usage and the generated `mcp.json` contract so that I can adopt and troubleshoot the tool.",
+      "acceptanceCriteria": [
+        "Add `README` covering installation/build, wrapper usage examples, environment variables, and artifact outputs",
+        "Add `SPEC_mcp.json.md` describing the `mcp.json` format and schema rules (based on PRD section 8)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
