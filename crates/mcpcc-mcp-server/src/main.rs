@@ -1,10 +1,19 @@
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 struct McpJsonBundle {
     mcp_spec_version: String,
+    binary_path: String,
     tools: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExecLimits {
+    timeout_ms: u64,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +105,18 @@ fn load_mcp_json_bundle(path: &Path) -> Result<McpJsonBundle, ServerError> {
             )
         })?;
 
+    let binary_path = obj
+        .get("binary")
+        .and_then(|v| v.as_object())
+        .and_then(|binary| binary.get("path"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ServerError::InvalidMcpJson(
+                "mcp.json missing required string field: binary.path".into(),
+            )
+        })?;
+
     let tools = obj
         .get("tools")
         .and_then(|v| v.as_array())
@@ -114,6 +135,7 @@ fn load_mcp_json_bundle(path: &Path) -> Result<McpJsonBundle, ServerError> {
 
     Ok(McpJsonBundle {
         mcp_spec_version,
+        binary_path,
         tools,
     })
 }
@@ -225,6 +247,24 @@ fn handle_message(
             });
             Some(jsonrpc_result(id, result))
         }
+        "tools/callTool" => {
+            if !is_request {
+                return None;
+            }
+            let id = id.unwrap_or(serde_json::Value::Null);
+            if *lifecycle != Lifecycle::Ready {
+                return Some(jsonrpc_error(
+                    id,
+                    -32002,
+                    "server not initialized (expected initialize then initialized)",
+                ));
+            }
+
+            match handle_call_tool(obj, bundle) {
+                Ok(result) => Some(jsonrpc_result(id, result)),
+                Err(msg) => Some(jsonrpc_error(id, -32602, &msg)),
+            }
+        }
         _ => {
             if !is_request {
                 return None;
@@ -236,6 +276,272 @@ fn handle_message(
             ))
         }
     }
+}
+
+fn handle_call_tool(
+    msg_obj: &serde_json::Map<String, serde_json::Value>,
+    bundle: &McpJsonBundle,
+) -> Result<serde_json::Value, String> {
+    let params = msg_obj
+        .get("params")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| "invalid params (expected object): params".to_string())?;
+
+    let tool_name = params
+        .get("name")
+        .or_else(|| params.get("toolName"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "invalid params (expected string): params.name".to_string())?;
+
+    let Some(tool) = find_tool(bundle, tool_name) else {
+        return Ok(tool_error_result(&format!("tool not found: {tool_name}")));
+    };
+
+    if !tool_name.ends_with(".run_raw") {
+        return Ok(tool_error_result(&format!(
+            "unsupported tool (only *.run_raw is implemented): {tool_name}"
+        )));
+    }
+
+    let args_obj = params
+        .get("arguments")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| "invalid params (expected object): params.arguments".to_string())?;
+
+    let argv = args_obj
+        .get("argv")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "invalid params (expected array): arguments.argv".to_string())?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "invalid params (expected string): arguments.argv[]".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let limits = tool_exec_limits(tool);
+    let outcome = run_raw_binary(&bundle.binary_path, &argv, limits);
+
+    let summary = if let Some(err) = &outcome.spawn_error {
+        format!("spawn error: {err}")
+    } else if outcome.timed_out {
+        format!("exitCode={} timedOut=true", outcome.exit_code)
+    } else {
+        format!("exitCode={}", outcome.exit_code)
+    };
+
+    Ok(serde_json::json!({
+        "content": [{ "type": "text", "text": summary }],
+        "structuredContent": {
+            "stdout": String::from_utf8_lossy(&outcome.stdout).to_string(),
+            "stderr": String::from_utf8_lossy(&outcome.stderr).to_string(),
+            "exitCode": outcome.exit_code,
+            "durationMs": outcome.duration_ms,
+            "timedOut": outcome.timed_out,
+            "truncatedStdout": outcome.truncated_stdout,
+            "truncatedStderr": outcome.truncated_stderr,
+        },
+        "isError": outcome.is_error,
+    }))
+}
+
+fn find_tool<'a>(bundle: &'a McpJsonBundle, name: &str) -> Option<&'a serde_json::Value> {
+    bundle.tools.iter().find(|tool| {
+        tool.as_object()
+            .and_then(|obj| obj.get("name"))
+            .and_then(|v| v.as_str())
+            == Some(name)
+    })
+}
+
+fn tool_exec_limits(tool: &serde_json::Value) -> ExecLimits {
+    const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+    const DEFAULT_MAX_STDOUT_BYTES: usize = 1_048_576;
+    const DEFAULT_MAX_STDERR_BYTES: usize = 1_048_576;
+
+    let mut limits = ExecLimits {
+        timeout_ms: DEFAULT_TIMEOUT_MS,
+        max_stdout_bytes: DEFAULT_MAX_STDOUT_BYTES,
+        max_stderr_bytes: DEFAULT_MAX_STDERR_BYTES,
+    };
+
+    let Some(exec) = tool
+        .get("x-mcpcc")
+        .and_then(|v| v.as_object())
+        .and_then(|x| x.get("exec"))
+        .and_then(|v| v.as_object())
+    else {
+        return limits;
+    };
+
+    if let Some(timeout_ms) = exec.get("timeoutMs").and_then(|v| v.as_u64()) {
+        limits.timeout_ms = timeout_ms;
+    }
+    if let Some(max_stdout) = exec
+        .get("maxStdoutBytes")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+    {
+        limits.max_stdout_bytes = max_stdout;
+    }
+    if let Some(max_stderr) = exec
+        .get("maxStderrBytes")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+    {
+        limits.max_stderr_bytes = max_stderr;
+    }
+
+    limits
+}
+
+#[derive(Debug)]
+struct ToolRunOutcome {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_code: i64,
+    duration_ms: u64,
+    timed_out: bool,
+    truncated_stdout: bool,
+    truncated_stderr: bool,
+    is_error: bool,
+    spawn_error: Option<String>,
+}
+
+fn run_raw_binary(binary_path: &str, argv: &[String], limits: ExecLimits) -> ToolRunOutcome {
+    let started = Instant::now();
+    let mut cmd = std::process::Command::new(binary_path);
+    cmd.args(argv)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return ToolRunOutcome {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: -1,
+                duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                timed_out: false,
+                truncated_stdout: false,
+                truncated_stderr: false,
+                is_error: true,
+                spawn_error: Some(err.to_string()),
+            };
+        }
+    };
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let stdout_thread = std::thread::spawn(move || read_limited(stdout, limits.max_stdout_bytes));
+    let stderr_thread = std::thread::spawn(move || read_limited(stderr, limits.max_stderr_bytes));
+
+    let timeout = Duration::from_millis(limits.timeout_ms);
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break child.wait();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(err);
+            }
+        }
+    };
+
+    let (stdout, truncated_stdout) = stdout_thread.join().unwrap_or_else(|_| (Vec::new(), false));
+    let (stderr, truncated_stderr) = stderr_thread.join().unwrap_or_else(|_| (Vec::new(), false));
+
+    let exit_code = match status.as_ref() {
+        Ok(status) => exit_status_code(status),
+        Err(_) => -1,
+    };
+    let duration_ms: u64 = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    let is_error = timed_out || exit_code != 0;
+
+    ToolRunOutcome {
+        stdout,
+        stderr,
+        exit_code,
+        duration_ms,
+        timed_out,
+        truncated_stdout,
+        truncated_stderr,
+        is_error,
+        spawn_error: None,
+    }
+}
+
+fn exit_status_code(status: &std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return i64::from(code);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return i64::from(128 + signal);
+        }
+    }
+
+    -1
+}
+
+fn tool_error_result(message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "content": [{ "type": "text", "text": message }],
+        "structuredContent": {
+            "stdout": "",
+            "stderr": message,
+            "exitCode": -1,
+            "durationMs": 0,
+            "timedOut": false,
+            "truncatedStdout": false,
+            "truncatedStderr": false,
+        },
+        "isError": true,
+    })
+}
+
+fn read_limited<R: Read>(mut reader: R, limit: usize) -> (Vec<u8>, bool) {
+    let mut buf = [0u8; 4096];
+    let mut collected = Vec::new();
+    let mut truncated = false;
+
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        let remaining = limit.saturating_sub(collected.len());
+        if remaining == 0 {
+            truncated = true;
+            continue;
+        }
+
+        let to_copy = remaining.min(n);
+        collected.extend_from_slice(&buf[..to_copy]);
+        if to_copy < n {
+            truncated = true;
+        }
+    }
+
+    (collected, truncated)
 }
 
 fn jsonrpc_result(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {

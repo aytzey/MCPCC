@@ -12,6 +12,8 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - `mcpcc` copies the packaged `mcpcc-mcp-server` binary (resolved next to `mcpcc`, fallback to PATH) to `<base>.mcp-server` via `mcpcc::copy_packaged_mcp_server_binary()`.
 - `mcpcc-mcp-server` computes `<base>.mcp.json` by stripping `.mcp-server` from its executable filename (via `current_exe()`) and reading the file in the same directory.
 - `mcpcc-mcp-server` enforces MCP lifecycle `initialize` → `initialized` before serving `tools/listTools` (returns JSON-RPC error code -32002 otherwise).
+- `mcpcc-mcp-server` implements `tools/callTool` for `*.run_raw` with params `{name, arguments: {argv: string[]}}` and returns `structuredContent` fields `stdout`, `stderr`, `exitCode`, `durationMs`, `timedOut`, `truncatedStdout`, `truncatedStderr`.
+- `mcpcc-mcp-server` enforces per-tool exec limits from `tool.x-mcpcc.exec` (`timeoutMs`, `maxStdoutBytes`, `maxStderrBytes`) during `tools/callTool`.
 - MCP generation errors after a successful compilation must exit with code 70.
 - Use atomic JSON writes (temp file + parse validation + rename) for both `*.mcp.json` and `*.mcpcc-manifest.json`.
 - LLM is `required` by default; tests can use `--mcpcc-llm-mode=best-effort` (or `off` with `MCPCC_ALLOW_NO_LLM=1`) to avoid OpenRouter requirements.
@@ -175,4 +177,16 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: resolve the packaged server binary next to `mcpcc` first, then fall back to searching `PATH`.
   - Gotchas encountered: place server copy before manifest write so manifest only exists when the server copy succeeds.
   - Useful context: server copy failures are treated as MCP-generation failures and exit with code 70.
+---
+
+## 2026-01-26 16:56:08 +0300 - US-014
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-14.txt (use the latest file)
+- Implemented `tools/callTool` for `*.run_raw` in `mcpcc-mcp-server`, spawning the target binary and returning stdout/stderr/exitCode + timing/limit metadata via `structuredContent`.
+- Enforced per-tool `x-mcpcc.exec` limits for timeout and max stdout/stderr bytes; `isError=true` on spawn error, timeout, or non-zero exit.
+- Added stdio integration tests for success, timeout, and stdout/stderr truncation.
+- Files changed: `crates/mcpcc-mcp-server/src/main.rs`, `crates/mcpcc-mcp-server/tests/stdio_call_tool_run_raw.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: `tools/callTool` uses `params.name` + `params.arguments`; `*.run_raw` consumes `arguments.argv: string[]`.
+  - Gotchas encountered: integration tests need chmod (`0o755`) on copied server + temp-bin scripts, otherwise spawn fails.
+  - Useful context: truncation should not set `isError`; only spawn errors, timeouts, and non-zero exit codes do.
 ---
