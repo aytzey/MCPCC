@@ -1,9 +1,47 @@
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 pub const MCP_SPEC_VERSION: &str = "2025-11-25";
+pub const LLM_PROMPT_VERSION: &str = "v1";
+pub const DEFAULT_LLM_MODEL: &str = "openai/gpt-4o-mini";
+const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmMode {
+    Required,
+    BestEffort,
+    Off,
+}
+
+impl Default for LlmMode {
+    fn default() -> Self {
+        Self::Required
+    }
+}
+
+impl LlmMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmMode::Required => "required",
+            LlmMode::BestEffort => "best-effort",
+            LlmMode::Off => "off",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "required" => Some(LlmMode::Required),
+            "best-effort" => Some(LlmMode::BestEffort),
+            "off" => Some(LlmMode::Off),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct WrapperFlags {
@@ -14,6 +52,9 @@ pub struct WrapperFlags {
     pub mcp_json_out: Option<PathBuf>,
     pub server_out: Option<PathBuf>,
     pub manifest_out: Option<PathBuf>,
+    pub llm_mode: LlmMode,
+    pub llm_model: Option<String>,
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +67,7 @@ pub struct ParsedArgs {
 pub enum CliParseError {
     UnknownWrapperFlag(String),
     MissingValue(String),
+    InvalidValue { flag: String, value: String },
 }
 
 impl std::fmt::Display for CliParseError {
@@ -35,6 +77,9 @@ impl std::fmt::Display for CliParseError {
                 write!(f, "unknown mcpcc flag: {flag}")
             }
             CliParseError::MissingValue(flag) => write!(f, "missing value for {flag}"),
+            CliParseError::InvalidValue { flag, value } => {
+                write!(f, "invalid value for {flag}: {value}")
+            }
         }
     }
 }
@@ -192,6 +237,66 @@ fn consume_wrapper_flag(
         return Ok(true);
     }
 
+    if let Some(value) = arg.strip_prefix("--mcpcc-llm-mode=") {
+        let Some(mode) = LlmMode::parse(value) else {
+            return Err(CliParseError::InvalidValue {
+                flag: "--mcpcc-llm-mode".to_string(),
+                value: value.to_string(),
+            });
+        };
+        wrapper.llm_mode = mode;
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-llm-mode" {
+        *idx += 1;
+        let Some(value) = args.get(*idx) else {
+            return Err(CliParseError::MissingValue(arg.clone()));
+        };
+        let Some(mode) = LlmMode::parse(value) else {
+            return Err(CliParseError::InvalidValue {
+                flag: "--mcpcc-llm-mode".to_string(),
+                value: value.clone(),
+            });
+        };
+        wrapper.llm_mode = mode;
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if let Some(value) = arg.strip_prefix("--mcpcc-llm-model=") {
+        wrapper.llm_model = Some(value.to_string());
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-llm-model" {
+        *idx += 1;
+        let Some(value) = args.get(*idx) else {
+            return Err(CliParseError::MissingValue(arg.clone()));
+        };
+        wrapper.llm_model = Some(value.clone());
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if let Some(value) = arg.strip_prefix("--mcpcc-cache-dir=") {
+        wrapper.cache_dir = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-cache-dir" {
+        *idx += 1;
+        let Some(value) = args.get(*idx) else {
+            return Err(CliParseError::MissingValue(arg.clone()));
+        };
+        wrapper.cache_dir = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
     Ok(false)
 }
 
@@ -235,8 +340,101 @@ impl From<serde_json::Error> for JsonWriteError {
     }
 }
 
-pub fn build_minimal_mcp_json(artifacts: &ArtifactPaths) -> serde_json::Value {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmToolDescriptions {
+    pub tool_description: String,
+    pub params: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmManifestInfo {
+    pub mode: String,
+    pub provider: String,
+    pub model: String,
+    pub cache_hit: bool,
+    pub prompt_version: String,
+    pub used_placeholder: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LlmEnv {
+    pub openrouter_api_key: Option<String>,
+    pub allow_no_llm: bool,
+    pub openrouter_base_url: Option<String>,
+}
+
+impl LlmEnv {
+    pub fn from_current() -> Self {
+        let openrouter_api_key = std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .and_then(|v| (!v.trim().is_empty()).then_some(v));
+        let allow_no_llm = matches!(std::env::var("MCPCC_ALLOW_NO_LLM"), Ok(v) if v.trim() == "1");
+        let openrouter_base_url = std::env::var("MCPCC_OPENROUTER_BASE_URL")
+            .ok()
+            .and_then(|v| (!v.trim().is_empty()).then_some(v));
+        Self {
+            openrouter_api_key,
+            allow_no_llm,
+            openrouter_base_url,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum LlmError {
+    MissingApiKey,
+    Io(std::io::Error),
+    Json(serde_json::Error),
+    Http(String),
+    InvalidOutput(String),
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmError::MissingApiKey => write!(f, "OPENROUTER_API_KEY is not set"),
+            LlmError::Io(err) => write!(f, "{err}"),
+            LlmError::Json(err) => write!(f, "{err}"),
+            LlmError::Http(msg) => write!(f, "{msg}"),
+            LlmError::InvalidOutput(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
+
+impl From<std::io::Error> for LlmError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<serde_json::Error> for LlmError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Json(value)
+    }
+}
+
+impl From<JsonWriteError> for LlmError {
+    fn from(value: JsonWriteError) -> Self {
+        match value {
+            JsonWriteError::Io(err) => Self::Io(err),
+            JsonWriteError::Json(err) => Self::Json(err),
+        }
+    }
+}
+
+pub fn build_minimal_mcp_json(
+    artifacts: &ArtifactPaths,
+    descriptions: &LlmToolDescriptions,
+) -> serde_json::Value {
     let tool_name = format!("{}.run_raw", artifacts.base_name);
+    let argv_description = descriptions
+        .params
+        .get("argv")
+        .map(String::as_str)
+        .unwrap_or("Arguments to pass to the binary as an argv array.");
     serde_json::json!({
         "mcpccVersion": env!("CARGO_PKG_VERSION"),
         "mcpSpecVersion": MCP_SPEC_VERSION,
@@ -246,12 +444,13 @@ pub fn build_minimal_mcp_json(artifacts: &ArtifactPaths) -> serde_json::Value {
         "tools": [
             {
                 "name": tool_name,
-                "description": "Run the target binary with raw argv and return stdout/stderr/exit code.",
+                "description": descriptions.tool_description,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "argv": {
                             "type": "array",
+                            "description": argv_description,
                             "items": { "type": "string" },
                         },
                     },
@@ -263,8 +462,11 @@ pub fn build_minimal_mcp_json(artifacts: &ArtifactPaths) -> serde_json::Value {
     })
 }
 
-pub fn write_mcp_json_atomic(artifacts: &ArtifactPaths) -> Result<(), JsonWriteError> {
-    let mcp_json = build_minimal_mcp_json(artifacts);
+pub fn write_mcp_json_atomic(
+    artifacts: &ArtifactPaths,
+    descriptions: &LlmToolDescriptions,
+) -> Result<(), JsonWriteError> {
+    let mcp_json = build_minimal_mcp_json(artifacts, descriptions);
     write_json_atomic(&artifacts.mcp_json_path, &mcp_json)?;
 
     Ok(())
@@ -275,6 +477,7 @@ pub fn build_manifest_json(
     compiler_args: &[String],
     compiler_exit_code: i32,
     artifacts: &ArtifactPaths,
+    llm: &LlmManifestInfo,
 ) -> serde_json::Value {
     let compiler_path = compiler.to_string_lossy();
     let mut argv = Vec::with_capacity(1 + compiler_args.len());
@@ -300,11 +503,13 @@ pub fn build_manifest_json(
             "notes": [],
         },
         "llm": {
-            "mode": null,
-            "provider": null,
-            "model": null,
-            "cacheHit": null,
-            "promptVersion": null,
+            "mode": llm.mode,
+            "provider": llm.provider,
+            "model": llm.model,
+            "cacheHit": llm.cache_hit,
+            "promptVersion": llm.prompt_version,
+            "usedPlaceholder": llm.used_placeholder,
+            "error": llm.error,
         },
         "artifacts": {
             "mcpJson": artifacts.mcp_json_path.to_string_lossy(),
@@ -319,10 +524,127 @@ pub fn write_manifest_json_atomic(
     compiler_args: &[String],
     compiler_exit_code: i32,
     artifacts: &ArtifactPaths,
+    llm: &LlmManifestInfo,
 ) -> Result<(), JsonWriteError> {
-    let manifest = build_manifest_json(compiler, compiler_args, compiler_exit_code, artifacts);
+    let manifest = build_manifest_json(compiler, compiler_args, compiler_exit_code, artifacts, llm);
     write_json_atomic(&artifacts.manifest_path, &manifest)?;
     Ok(())
+}
+
+pub fn generate_run_raw_llm_descriptions(
+    artifacts: &ArtifactPaths,
+    wrapper: &WrapperFlags,
+    llm_env: &LlmEnv,
+) -> Result<(LlmToolDescriptions, LlmManifestInfo), LlmError> {
+    let provider = "openrouter".to_string();
+    let mode = wrapper.llm_mode;
+    let model = resolve_llm_model(wrapper);
+    let prompt_version = LLM_PROMPT_VERSION.to_string();
+
+    if mode == LlmMode::Off {
+        return Ok((
+            placeholder_run_raw_descriptions(),
+            LlmManifestInfo {
+                mode: mode.as_str().to_string(),
+                provider,
+                model,
+                cache_hit: false,
+                prompt_version,
+                used_placeholder: true,
+                error: Some("llm mode off".to_string()),
+            },
+        ));
+    }
+
+    let analysis_summary_json = run_raw_analysis_summary_json(&artifacts.base_name);
+    let cache_dir = resolve_cache_dir(wrapper);
+    let cache_key = llm_cache_key_hex(LLM_PROMPT_VERSION, &model, analysis_summary_json.as_str());
+    let cache_path = cache_dir.join("llm").join(format!("{cache_key}.json"));
+
+    if let Ok(descriptions) = read_llm_cache(&cache_path) {
+        return Ok((
+            descriptions,
+            LlmManifestInfo {
+                mode: mode.as_str().to_string(),
+                provider,
+                model,
+                cache_hit: true,
+                prompt_version,
+                used_placeholder: false,
+                error: None,
+            },
+        ));
+    }
+
+    let api_key = match llm_env
+        .openrouter_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(v) => v,
+        None => {
+            if mode == LlmMode::Required {
+                return Err(LlmError::MissingApiKey);
+            }
+            return Ok((
+                placeholder_run_raw_descriptions(),
+                LlmManifestInfo {
+                    mode: mode.as_str().to_string(),
+                    provider,
+                    model,
+                    cache_hit: false,
+                    prompt_version,
+                    used_placeholder: true,
+                    error: Some("OPENROUTER_API_KEY missing".to_string()),
+                },
+            ));
+        }
+    };
+
+    let base_url = llm_env
+        .openrouter_base_url
+        .as_deref()
+        .unwrap_or(DEFAULT_OPENROUTER_BASE_URL);
+
+    match call_openrouter(api_key, base_url, &model, analysis_summary_json.as_str()) {
+        Ok(descriptions) => {
+            let cache_value = serde_json::json!({
+                "toolDescription": descriptions.tool_description.clone(),
+                "params": descriptions.params.clone(),
+            });
+            write_json_atomic(&cache_path, &cache_value)?;
+            Ok((
+                descriptions,
+                LlmManifestInfo {
+                    mode: mode.as_str().to_string(),
+                    provider,
+                    model,
+                    cache_hit: false,
+                    prompt_version,
+                    used_placeholder: false,
+                    error: None,
+                },
+            ))
+        }
+        Err(err) => {
+            if mode == LlmMode::Required {
+                return Err(err);
+            }
+            Ok((
+                placeholder_run_raw_descriptions(),
+                LlmManifestInfo {
+                    mode: mode.as_str().to_string(),
+                    provider,
+                    model,
+                    cache_hit: false,
+                    prompt_version,
+                    used_placeholder: true,
+                    error: Some("OpenRouter request failed".to_string()),
+                },
+            ))
+        }
+    }
 }
 
 fn write_json_atomic(out_path: &Path, json: &serde_json::Value) -> Result<(), JsonWriteError> {
@@ -363,6 +685,238 @@ fn write_json_atomic(out_path: &Path, json: &serde_json::Value) -> Result<(), Js
     }
 
     Ok(())
+}
+
+fn resolve_llm_model(wrapper: &WrapperFlags) -> String {
+    wrapper
+        .llm_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_LLM_MODEL)
+        .to_string()
+}
+
+fn resolve_cache_dir(wrapper: &WrapperFlags) -> PathBuf {
+    wrapper
+        .cache_dir
+        .as_ref()
+        .filter(|p| !p.as_os_str().is_empty())
+        .cloned()
+        .unwrap_or_else(default_cache_dir)
+}
+
+fn default_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir).join("mcpcc");
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".cache").join("mcpcc");
+        }
+    }
+
+    PathBuf::from(".mcpcc-cache")
+}
+
+fn run_raw_analysis_summary_json(base_name: &str) -> String {
+    serde_json::json!({
+        "toolName": format!("{base_name}.run_raw"),
+        "params": ["argv"],
+    })
+    .to_string()
+}
+
+fn llm_cache_key_hex(prompt_version: &str, model: &str, analysis_summary_json: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prompt_version.as_bytes());
+    hasher.update(model.as_bytes());
+    hasher.update(analysis_summary_json.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn placeholder_run_raw_descriptions() -> LlmToolDescriptions {
+    let mut params = BTreeMap::new();
+    params.insert(
+        "argv".to_string(),
+        "Arguments to pass to the binary as an argv array.".to_string(),
+    );
+    LlmToolDescriptions {
+        tool_description: "Run the target binary with raw argv and return stdout/stderr/exit code."
+            .to_string(),
+        params,
+    }
+}
+
+fn sanitize_description(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let mut out = String::new();
+    let mut count = 0usize;
+    for ch in trimmed.chars() {
+        if count >= 240 {
+            break;
+        }
+        out.push(ch);
+        count += 1;
+    }
+
+    (count >= 5).then_some(out)
+}
+
+fn parse_run_raw_llm_output(value: &serde_json::Value) -> Result<LlmToolDescriptions, LlmError> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| LlmError::InvalidOutput("LLM output must be a JSON object".to_string()))?;
+
+    let tool_description_raw = obj
+        .get("toolDescription")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            LlmError::InvalidOutput("LLM output missing toolDescription string".to_string())
+        })?;
+    let Some(tool_description) = sanitize_description(tool_description_raw) else {
+        return Err(LlmError::InvalidOutput(
+            "toolDescription must be 5–240 characters".to_string(),
+        ));
+    };
+
+    let params_obj = obj
+        .get("params")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| LlmError::InvalidOutput("LLM output missing params object".to_string()))?;
+    let argv_raw = params_obj
+        .get("argv")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            LlmError::InvalidOutput("LLM output missing params.argv string".to_string())
+        })?;
+    let Some(argv_description) = sanitize_description(argv_raw) else {
+        return Err(LlmError::InvalidOutput(
+            "params.argv must be 5–240 characters".to_string(),
+        ));
+    };
+
+    let mut params = BTreeMap::new();
+    params.insert("argv".to_string(), argv_description);
+
+    Ok(LlmToolDescriptions {
+        tool_description,
+        params,
+    })
+}
+
+fn parse_llm_output_str(content: &str) -> Result<LlmToolDescriptions, LlmError> {
+    let content = content.trim();
+
+    let parsed: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => {
+            let Some(start) = content.find('{') else {
+                return Err(LlmError::InvalidOutput(
+                    "LLM output was not valid JSON".to_string(),
+                ));
+            };
+            let Some(end) = content.rfind('}') else {
+                return Err(LlmError::InvalidOutput(
+                    "LLM output was not valid JSON".to_string(),
+                ));
+            };
+            serde_json::from_str(&content[start..=end])
+                .map_err(|_| LlmError::InvalidOutput("LLM output was not valid JSON".to_string()))?
+        }
+    };
+
+    parse_run_raw_llm_output(&parsed)
+}
+
+fn read_llm_cache(path: &Path) -> Result<LlmToolDescriptions, LlmError> {
+    let bytes = std::fs::read(path)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    parse_run_raw_llm_output(&value)
+}
+
+fn call_openrouter(
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    analysis_summary_json: &str,
+) -> Result<LlmToolDescriptions, LlmError> {
+    let base_url = base_url.trim_end_matches('/');
+    let url = format!("{base_url}/chat/completions");
+
+    let system_prompt = concat!(
+        "You generate short plain-text descriptions for an MCP tool. ",
+        "Return ONLY a JSON object with keys: toolDescription (string) and params (object). ",
+        "Do not use markdown or code fences. ",
+        "All descriptions must be 5–240 characters after trimming.",
+    );
+    let user_prompt = format!(
+        "analysis_summary_json:\n{analysis_summary_json}\n\nReturn JSON: \
+{{\"toolDescription\":\"...\",\"params\":{{\"argv\":\"...\"}}}}"
+    );
+
+    let body = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_prompt },
+        ],
+        "response_format": { "type": "json_object" },
+    });
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(20))
+        .timeout_write(Duration::from_secs(20))
+        .build();
+
+    let response = agent
+        .post(&url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json")
+        .send_json(body);
+
+    let response = match response {
+        Ok(v) => v,
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            return Err(LlmError::Http(format!(
+                "OpenRouter request failed with HTTP {code}: {body}"
+            )));
+        }
+        Err(ureq::Error::Transport(err)) => {
+            return Err(LlmError::Http(format!("OpenRouter request failed: {err}")));
+        }
+    };
+
+    let v: serde_json::Value = response.into_json()?;
+    let content = v
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| {
+            LlmError::InvalidOutput(
+                "OpenRouter response missing choices[0].message.content".to_string(),
+            )
+        })?;
+
+    parse_llm_output_str(content)
 }
 
 pub fn plan_artifacts(wrapper: &WrapperFlags, passthrough: &[String]) -> Option<ArtifactPaths> {
@@ -698,6 +1252,19 @@ mod tests {
         assert_eq!(
             err,
             CliParseError::UnknownWrapperFlag("--mcpcc-nope".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_args_errors_on_invalid_llm_mode() {
+        let err =
+            parse_args(&v(&["--mcpcc-llm-mode=wat"])).expect_err("invalid llm mode should fail");
+        assert_eq!(
+            err,
+            CliParseError::InvalidValue {
+                flag: "--mcpcc-llm-mode".to_string(),
+                value: "wat".to_string(),
+            }
         );
     }
 

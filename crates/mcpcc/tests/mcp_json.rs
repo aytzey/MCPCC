@@ -43,6 +43,7 @@ fn write_exe(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
 #[test]
 fn writes_minimal_mcp_json_on_successful_link() {
     let td = TempDir::new("mcpcc-mcp-json-link");
+    let cache_dir = td.path.join("cache");
     let cc_path = write_exe(
         &td.path,
         "fakecc",
@@ -74,8 +75,14 @@ exit 0
     let bin = env!("CARGO_BIN_EXE_mcpcc");
     let out = Command::new(bin)
         .current_dir(&td.path)
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("MCPCC_OPENROUTER_BASE_URL")
         .arg("--mcpcc-cc")
         .arg(&cc_path)
+        .arg("--mcpcc-llm-mode")
+        .arg("best-effort")
+        .arg("--mcpcc-cache-dir")
+        .arg(&cache_dir)
         .arg("--")
         .arg("hello.c")
         .arg("-o")
@@ -120,6 +127,10 @@ exit 0
         .iter()
         .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("hello.run_raw"))
         .expect("fallback tool hello.run_raw");
+    assert!(
+        tool.get("description").and_then(|v| v.as_str()).is_some(),
+        "fallback tool must have a description"
+    );
     assert!(
         tool.get("inputSchema")
             .and_then(|v| v.as_object())
@@ -169,11 +180,30 @@ exit 0
         v.get("analysis").and_then(|v| v.as_object()).is_some(),
         "manifest must include analysis object"
     );
+    let llm = v
+        .get("llm")
+        .and_then(|v| v.as_object())
+        .expect("llm object");
+    assert_eq!(
+        llm.get("mode").and_then(|v| v.as_str()),
+        Some("best-effort")
+    );
+    assert_eq!(
+        llm.get("provider").and_then(|v| v.as_str()),
+        Some("openrouter")
+    );
+    assert_eq!(llm.get("cacheHit").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(
+        llm.get("promptVersion").and_then(|v| v.as_str()),
+        Some(mcpcc::LLM_PROMPT_VERSION)
+    );
+    assert_eq!(
+        llm.get("usedPlaceholder").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     assert!(
-        v.get("llm")
-            .and_then(|l| l.get("mode"))
-            .map_or(false, |v| v.is_null()),
-        "manifest must include llm placeholders"
+        llm.get("error").and_then(|v| v.as_str()).is_some(),
+        "manifest must record placeholder reason"
     );
 }
 
@@ -278,6 +308,7 @@ fn does_not_write_mcp_json_when_compiler_fails() {
 #[test]
 fn mcp_generation_failure_exits_70() {
     let td = TempDir::new("mcpcc-mcp-gen-fails");
+    let cache_dir = td.path.join("cache");
     let cc_path = write_exe(
         &td.path,
         "fakecc",
@@ -309,8 +340,14 @@ exit 0
     let bin = env!("CARGO_BIN_EXE_mcpcc");
     let out = Command::new(bin)
         .current_dir(&td.path)
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("MCPCC_OPENROUTER_BASE_URL")
         .arg("--mcpcc-cc")
         .arg(&cc_path)
+        .arg("--mcpcc-llm-mode")
+        .arg("best-effort")
+        .arg("--mcpcc-cache-dir")
+        .arg(&cache_dir)
         .arg("--mcpcc-mcp-json-out")
         .arg("bin")
         .arg("--")

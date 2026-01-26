@@ -32,6 +32,12 @@ fn main() -> ExitCode {
         }
     };
 
+    let llm_env = mcpcc::LlmEnv::from_current();
+    if parsed.wrapper.llm_mode == mcpcc::LlmMode::Off && !llm_env.allow_no_llm {
+        eprintln!("mcpcc: --mcpcc-llm-mode=off requires MCPCC_ALLOW_NO_LLM=1");
+        return ExitCode::from(2);
+    }
+
     let env = mcpcc::EnvSnapshot::from_current();
     let compiler = match mcpcc::resolve_underlying_compiler(&parsed.wrapper, &env) {
         Ok(v) => v,
@@ -81,7 +87,30 @@ fn main() -> ExitCode {
     }
 
     if let Some(artifacts) = artifacts {
-        if let Err(err) = mcpcc::write_mcp_json_atomic(&artifacts) {
+        let (descriptions, llm_manifest) =
+            match mcpcc::generate_run_raw_llm_descriptions(&artifacts, &parsed.wrapper, &llm_env) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("mcpcc: failed to generate LLM descriptions: {err}");
+                    return ExitCode::from(70);
+                }
+            };
+
+        if parsed.wrapper.verbose {
+            eprintln!(
+                "mcpcc: llm: mode={} provider={} model={} cacheHit={} usedPlaceholder={}",
+                llm_manifest.mode,
+                llm_manifest.provider,
+                llm_manifest.model,
+                llm_manifest.cache_hit,
+                llm_manifest.used_placeholder
+            );
+            if let Some(err) = llm_manifest.error.as_deref() {
+                eprintln!("mcpcc: llm: note: {err}");
+            }
+        }
+
+        if let Err(err) = mcpcc::write_mcp_json_atomic(&artifacts, &descriptions) {
             eprintln!("mcpcc: failed to write mcp.json: {err}");
             return ExitCode::from(70);
         }
@@ -92,9 +121,13 @@ fn main() -> ExitCode {
             );
         }
 
-        if let Err(err) =
-            mcpcc::write_manifest_json_atomic(&compiler, &parsed.passthrough, 0, &artifacts)
-        {
+        if let Err(err) = mcpcc::write_manifest_json_atomic(
+            &compiler,
+            &parsed.passthrough,
+            0,
+            &artifacts,
+            &llm_manifest,
+        ) {
             eprintln!("mcpcc: failed to write manifest: {err}");
             return ExitCode::from(70);
         }

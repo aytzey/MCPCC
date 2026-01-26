@@ -62,8 +62,12 @@ exit 0
     let bin = env!("CARGO_BIN_EXE_mcpcc");
     let out = Command::new(bin)
         .current_dir(&td.path)
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("MCPCC_OPENROUTER_BASE_URL")
         .arg("--mcpcc-cc")
         .arg(&cc_path)
+        .arg("--mcpcc-llm-mode")
+        .arg("best-effort")
         .arg("--")
         .arg("-Wall")
         .arg("hello.c")

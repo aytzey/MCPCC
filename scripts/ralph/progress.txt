@@ -10,6 +10,8 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - Use `mcpcc::plan_artifacts()` to detect link vs compile-only and compute deterministic artifact paths (with wrapper overrides).
 - MCP generation errors after a successful compilation must exit with code 70.
 - Use atomic JSON writes (temp file + parse validation + rename) for both `*.mcp.json` and `*.mcpcc-manifest.json`.
+- LLM is `required` by default; tests can use `--mcpcc-llm-mode=best-effort` (or `off` with `MCPCC_ALLOW_NO_LLM=1`) to avoid OpenRouter requirements.
+- For LLM integration tests, point `MCPCC_OPENROUTER_BASE_URL` at a local mock server and set `--mcpcc-cache-dir` to a temp dir to avoid global cache/network.
 ---
 
 ## 2026-01-26 12:43:45 +0300 - US-001
@@ -76,4 +78,17 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: use atomic JSON writes for manifest + tool bundle to avoid partial/corrupt outputs.
   - Gotchas encountered: failing MCP generation should not be conflated with compiler failures; keep the exit code 70 boundary strict.
   - Useful context: `--mcpcc-verbose` is intended for stderr-only diagnostic logging; keep default logs minimal.
+---
+
+## 2026-01-26 14:04:14 +0300 - US-007
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-7.txt (use the latest file)
+- Implemented OpenRouter-backed tool/param description generation with deterministic caching and `--mcpcc-llm-mode required|best-effort|off` (default `required`).
+- Added `--mcpcc-llm-model` and `--mcpcc-cache-dir` plus `MCPCC_OPENROUTER_BASE_URL` override for tests.
+- Integrated LLM output into `mcp.json` tool + param descriptions and recorded LLM metadata (including placeholder usage) in the manifest.
+- Added integration tests covering required-mode caching, API failure exit 70, best-effort placeholders, and off-mode gating.
+- Files changed: `crates/mcpcc/Cargo.toml`, `Cargo.lock`, `crates/mcpcc/src/lib.rs`, `crates/mcpcc/src/main.rs`, `crates/mcpcc/tests/llm.rs`, `crates/mcpcc/tests/mcp_json.rs`, `crates/mcpcc/tests/passthrough.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: use `MCPCC_OPENROUTER_BASE_URL` + `--mcpcc-cache-dir` to test LLM behavior without hitting real OpenRouter or global caches.
+  - Gotchas encountered: builds on this runner may require setting `CARGO_TARGET_DIR` off `/projects` due to limited disk space.
+  - Useful context: in `required` mode, cache miss + LLM failure causes `mcpcc` to exit 70 and skip writing MCP artifacts.
 ---
