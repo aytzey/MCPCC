@@ -6,6 +6,7 @@ Started: Mon Jan 26 12:36:03 PM +03 2026
 - Run `cargo fmt --all --check && cargo test && cargo check` before committing.
 - For integration tests, run binaries via `env!("CARGO_BIN_EXE_<bin>")` instead of shelling out to `cargo run`.
 - For compiler-invocation tests, point `--mcpcc-cc` at a temp-dir shell-script "fake compiler" to assert argv + exit-code behavior.
+- Use `mcpcc::plan_artifacts()` to detect link vs compile-only and compute deterministic artifact paths (with wrapper overrides).
 ---
 
 ## 2026-01-26 12:43:45 +0300 - US-001
@@ -38,4 +39,14 @@ Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-
   - Patterns discovered: for passthrough behavior, validate argv + exit codes with a temp "fake compiler" script pointed to by `--mcpcc-cc`.
   - Gotchas encountered: `cargo fmt --all` may adjust formatting after adding new test files; rerun before `--check`.
   - Useful context: passthrough now runs before any MCP artifact generation (future stories should keep this contract).
+---
+
+## 2026-01-26 13:11:12 +0300 - US-004
+Codex output: /projects/ai_enabled_c_compiler/scripts/ralph/.codex-last-message-iter-4.txt
+- Implemented executable-link detection and deterministic artifact path planning (including output override flags).
+- Files changed: `crates/mcpcc/src/lib.rs`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Patterns discovered: use `mcpcc::plan_artifacts()` to compute `bin_path` + artifact paths; it returns `None` for compile-only (`-c`, `-E`, `-S`, `-shared`) invocations.
+  - Gotchas encountered: default link output is `./a.out`, and artifact filenames are based on the binary file name (including extension, e.g. `a.out.mcp.json`).
+  - Useful context: wrapper supports `--mcpcc-artifacts-dir` plus per-artifact overrides (`--mcpcc-mcp-json-out`, `--mcpcc-server-out`, `--mcpcc-manifest-out`).
 ---

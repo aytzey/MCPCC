@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 pub struct WrapperFlags {
     pub cc: Option<String>,
     pub print_cc: bool,
+    pub artifacts_dir: Option<PathBuf>,
+    pub mcp_json_out: Option<PathBuf>,
+    pub server_out: Option<PathBuf>,
+    pub manifest_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,30 +54,11 @@ pub fn parse_args(args: &[String]) -> Result<ParsedArgs, CliParseError> {
 
     let mut idx = 0;
     while idx < args.len() {
+        if consume_wrapper_flag(args, &mut idx, &mut wrapper)? {
+            continue;
+        }
+
         let arg = &args[idx];
-
-        if arg == "--mcpcc-print-cc" {
-            wrapper.print_cc = true;
-            idx += 1;
-            continue;
-        }
-
-        if let Some(value) = arg.strip_prefix("--mcpcc-cc=") {
-            wrapper.cc = Some(value.to_string());
-            idx += 1;
-            continue;
-        }
-
-        if arg == "--mcpcc-cc" {
-            idx += 1;
-            let Some(value) = args.get(idx) else {
-                return Err(CliParseError::MissingValue(arg.clone()));
-            };
-            wrapper.cc = Some(value.clone());
-            idx += 1;
-            continue;
-        }
-
         if arg.starts_with("--mcpcc-") {
             return Err(CliParseError::UnknownWrapperFlag(arg.clone()));
         }
@@ -91,34 +76,198 @@ pub fn parse_args(args: &[String]) -> Result<ParsedArgs, CliParseError> {
 fn parse_wrapper_args(args: &[String], wrapper: &mut WrapperFlags) -> Result<(), CliParseError> {
     let mut idx = 0;
     while idx < args.len() {
-        let arg = &args[idx];
-
-        if arg == "--mcpcc-print-cc" {
-            wrapper.print_cc = true;
-            idx += 1;
+        if consume_wrapper_flag(args, &mut idx, wrapper)? {
             continue;
         }
 
-        if let Some(value) = arg.strip_prefix("--mcpcc-cc=") {
-            wrapper.cc = Some(value.to_string());
-            idx += 1;
-            continue;
-        }
-
-        if arg == "--mcpcc-cc" {
-            idx += 1;
-            let Some(value) = args.get(idx) else {
-                return Err(CliParseError::MissingValue(arg.clone()));
-            };
-            wrapper.cc = Some(value.clone());
-            idx += 1;
-            continue;
-        }
-
-        return Err(CliParseError::UnknownWrapperFlag(arg.clone()));
+        return Err(CliParseError::UnknownWrapperFlag(args[idx].clone()));
     }
 
     Ok(())
+}
+
+fn consume_wrapper_flag(
+    args: &[String],
+    idx: &mut usize,
+    wrapper: &mut WrapperFlags,
+) -> Result<bool, CliParseError> {
+    let arg = args
+        .get(*idx)
+        .ok_or_else(|| CliParseError::UnknownWrapperFlag("<missing arg>".to_string()))?;
+
+    if arg == "--mcpcc-print-cc" {
+        wrapper.print_cc = true;
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if let Some(value) = arg.strip_prefix("--mcpcc-cc=") {
+        wrapper.cc = Some(value.to_string());
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-cc" {
+        *idx += 1;
+        let Some(value) = args.get(*idx) else {
+            return Err(CliParseError::MissingValue(arg.clone()));
+        };
+        wrapper.cc = Some(value.clone());
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if let Some(value) = arg.strip_prefix("--mcpcc-artifacts-dir=") {
+        wrapper.artifacts_dir = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-artifacts-dir" {
+        *idx += 1;
+        let Some(value) = args.get(*idx) else {
+            return Err(CliParseError::MissingValue(arg.clone()));
+        };
+        wrapper.artifacts_dir = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if let Some(value) = arg.strip_prefix("--mcpcc-mcp-json-out=") {
+        wrapper.mcp_json_out = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-mcp-json-out" {
+        *idx += 1;
+        let Some(value) = args.get(*idx) else {
+            return Err(CliParseError::MissingValue(arg.clone()));
+        };
+        wrapper.mcp_json_out = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if let Some(value) = arg.strip_prefix("--mcpcc-server-out=") {
+        wrapper.server_out = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-server-out" {
+        *idx += 1;
+        let Some(value) = args.get(*idx) else {
+            return Err(CliParseError::MissingValue(arg.clone()));
+        };
+        wrapper.server_out = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if let Some(value) = arg.strip_prefix("--mcpcc-manifest-out=") {
+        wrapper.manifest_out = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-manifest-out" {
+        *idx += 1;
+        let Some(value) = args.get(*idx) else {
+            return Err(CliParseError::MissingValue(arg.clone()));
+        };
+        wrapper.manifest_out = Some(PathBuf::from(value));
+        *idx += 1;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactPaths {
+    pub bin_path: PathBuf,
+    pub base_name: String,
+    pub mcp_json_path: PathBuf,
+    pub server_path: PathBuf,
+    pub manifest_path: PathBuf,
+}
+
+pub fn plan_artifacts(wrapper: &WrapperFlags, passthrough: &[String]) -> Option<ArtifactPaths> {
+    if should_skip_mcp_artifact_generation(passthrough) {
+        return None;
+    }
+
+    let bin_path = resolve_bin_path(passthrough);
+    let base_name = bin_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "a.out".to_string());
+
+    let default_dir = bin_path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = wrapper.artifacts_dir.as_deref().unwrap_or(default_dir);
+
+    let mut mcp_json_path = dir.join(format!("{base_name}.mcp.json"));
+    let mut server_path = dir.join(format!("{base_name}.mcp-server"));
+    let mut manifest_path = dir.join(format!("{base_name}.mcpcc-manifest.json"));
+
+    if let Some(path) = wrapper.mcp_json_out.as_ref() {
+        mcp_json_path = path.clone();
+    }
+    if let Some(path) = wrapper.server_out.as_ref() {
+        server_path = path.clone();
+    }
+    if let Some(path) = wrapper.manifest_out.as_ref() {
+        manifest_path = path.clone();
+    }
+
+    Some(ArtifactPaths {
+        bin_path,
+        base_name,
+        mcp_json_path,
+        server_path,
+        manifest_path,
+    })
+}
+
+fn should_skip_mcp_artifact_generation(passthrough: &[String]) -> bool {
+    passthrough
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-c" | "-E" | "-S" | "-shared" | "--shared"))
+}
+
+fn resolve_bin_path(passthrough: &[String]) -> PathBuf {
+    if let Some(path) = parse_output_path(passthrough) {
+        return PathBuf::from(path);
+    }
+    PathBuf::from("./a.out")
+}
+
+fn parse_output_path(passthrough: &[String]) -> Option<String> {
+    let mut out: Option<String> = None;
+    let mut idx = 0;
+    while idx < passthrough.len() {
+        let arg = &passthrough[idx];
+
+        if arg == "-o" {
+            idx += 1;
+            if let Some(value) = passthrough.get(idx) {
+                out = Some(value.clone());
+            }
+            idx += 1;
+            continue;
+        }
+
+        if let Some(value) = arg.strip_prefix("-o") {
+            if !value.is_empty() {
+                out = Some(value.to_string());
+            }
+        }
+
+        idx += 1;
+    }
+
+    out
 }
 
 #[derive(Debug, Clone, Default)]
@@ -353,12 +502,17 @@ mod tests {
         let parsed = parse_args(&v(&[
             "-Wall",
             "--mcpcc-cc=clang",
+            "--mcpcc-artifacts-dir=artifacts",
             "hello.c",
             "--mcpcc-print-cc",
         ]))
         .expect("parse");
         assert_eq!(parsed.wrapper.cc.as_deref(), Some("clang"));
         assert!(parsed.wrapper.print_cc);
+        assert_eq!(
+            parsed.wrapper.artifacts_dir.as_deref(),
+            Some(Path::new("artifacts"))
+        );
         assert_eq!(parsed.passthrough, v(&["-Wall", "hello.c"]));
     }
 
@@ -380,7 +534,7 @@ mod tests {
 
         let wrapper = WrapperFlags {
             cc: Some("flagcc".to_string()),
-            print_cc: false,
+            ..WrapperFlags::default()
         };
         let env = EnvSnapshot {
             mcpcc_cc: Some("mcpccenv".to_string()),
@@ -424,5 +578,83 @@ mod tests {
 
         let resolved = resolve_underlying_compiler(&wrapper, &env).expect("resolve");
         assert_eq!(resolved, clang);
+    }
+
+    #[test]
+    fn artifact_plan_skips_compile_only_flags() {
+        for flag in ["-c", "-E", "-S", "-shared"] {
+            let wrapper = WrapperFlags::default();
+            let passthrough = v(&["hello.c", flag, "-o", "hello"]);
+            assert_eq!(plan_artifacts(&wrapper, &passthrough), None, "flag: {flag}");
+        }
+    }
+
+    #[test]
+    fn artifact_plan_defaults_to_a_out_when_linking() {
+        let wrapper = WrapperFlags::default();
+        let plan = plan_artifacts(&wrapper, &v(&["hello.c"])).expect("plan");
+        assert_eq!(plan.bin_path, PathBuf::from("./a.out"));
+        assert_eq!(plan.base_name, "a.out");
+        assert_eq!(plan.mcp_json_path, PathBuf::from("./a.out.mcp.json"));
+        assert_eq!(plan.server_path, PathBuf::from("./a.out.mcp-server"));
+        assert_eq!(
+            plan.manifest_path,
+            PathBuf::from("./a.out.mcpcc-manifest.json")
+        );
+    }
+
+    #[test]
+    fn artifact_plan_uses_o_flag_for_bin_path_and_default_artifact_naming() {
+        let wrapper = WrapperFlags::default();
+        let plan = plan_artifacts(&wrapper, &v(&["hello.c", "-o", "bin/hello"])).expect("plan");
+        assert_eq!(plan.bin_path, PathBuf::from("bin/hello"));
+        assert_eq!(plan.base_name, "hello");
+        assert_eq!(plan.mcp_json_path, PathBuf::from("bin/hello.mcp.json"));
+        assert_eq!(plan.server_path, PathBuf::from("bin/hello.mcp-server"));
+        assert_eq!(
+            plan.manifest_path,
+            PathBuf::from("bin/hello.mcpcc-manifest.json")
+        );
+    }
+
+    #[test]
+    fn artifact_plan_respects_artifacts_dir_override() {
+        let wrapper = WrapperFlags {
+            artifacts_dir: Some(PathBuf::from("artifacts")),
+            ..WrapperFlags::default()
+        };
+        let plan = plan_artifacts(&wrapper, &v(&["hello.c", "-o", "bin/hello"])).expect("plan");
+        assert_eq!(plan.bin_path, PathBuf::from("bin/hello"));
+        assert_eq!(
+            plan.mcp_json_path,
+            PathBuf::from("artifacts/hello.mcp.json")
+        );
+        assert_eq!(
+            plan.server_path,
+            PathBuf::from("artifacts/hello.mcp-server")
+        );
+        assert_eq!(
+            plan.manifest_path,
+            PathBuf::from("artifacts/hello.mcpcc-manifest.json")
+        );
+    }
+
+    #[test]
+    fn artifact_plan_respects_individual_output_overrides() {
+        let wrapper = WrapperFlags {
+            artifacts_dir: Some(PathBuf::from("artifacts")),
+            mcp_json_out: Some(PathBuf::from("custom/tool.mcp.json")),
+            server_out: Some(PathBuf::from("custom/tool.mcp-server")),
+            manifest_out: Some(PathBuf::from("custom/tool.mcpcc-manifest.json")),
+            ..WrapperFlags::default()
+        };
+        let plan = plan_artifacts(&wrapper, &v(&["hello.c", "-o", "bin/hello"])).expect("plan");
+        assert_eq!(plan.bin_path, PathBuf::from("bin/hello"));
+        assert_eq!(plan.mcp_json_path, PathBuf::from("custom/tool.mcp.json"));
+        assert_eq!(plan.server_path, PathBuf::from("custom/tool.mcp-server"));
+        assert_eq!(
+            plan.manifest_path,
+            PathBuf::from("custom/tool.mcpcc-manifest.json")
+        );
     }
 }
