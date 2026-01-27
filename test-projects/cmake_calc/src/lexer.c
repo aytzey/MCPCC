@@ -1,58 +1,65 @@
 #include "lexer.h"
 
 #include <ctype.h>
+#include <stdlib.h>
 
 static void skip_ws(Lexer *lx) {
   while (*lx->p && isspace((unsigned char)*lx->p)) lx->p++;
 }
 
-void lexer_init(Lexer *lx, const char *input) {
-  lx->p = input ? input : "";
+void lexer_init(Lexer *lx, const char *input) { lx->p = input ? input : ""; }
+
+static Token tok(TokenKind k) {
+  Token t;
+  t.kind = k;
+  t.num_value = 0.0;
+  return t;
 }
 
 Token lexer_next(Lexer *lx) {
   skip_ws(lx);
-  Token t = {0};
   char c = *lx->p;
-  if (!c) {
-    t.kind = TOK_EOF;
-    return t;
-  }
+  if (!c) return tok(TOK_EOF);
 
-  if (c == '+') {
-    lx->p++;
-    t.kind = TOK_PLUS;
-    return t;
-  }
-  if (c == '-') {
-    lx->p++;
-    t.kind = TOK_MINUS;
-    return t;
-  }
-  if (c == '*') {
-    lx->p++;
-    t.kind = TOK_MUL;
-    return t;
-  }
-  if (c == '/') {
-    lx->p++;
-    t.kind = TOK_DIV;
-    return t;
-  }
-
-  if (isdigit((unsigned char)c)) {
-    int v = 0;
-    while (isdigit((unsigned char)*lx->p)) {
-      v = v * 10 + (*lx->p - '0');
+  switch (c) {
+    case '+':
       lx->p++;
+      return tok(TOK_PLUS);
+    case '-':
+      lx->p++;
+      return tok(TOK_MINUS);
+    case '*':
+      lx->p++;
+      return tok(TOK_MUL);
+    case '/':
+      lx->p++;
+      return tok(TOK_DIV);
+    case '(':
+      lx->p++;
+      return tok(TOK_LPAREN);
+    case ')':
+      lx->p++;
+      return tok(TOK_RPAREN);
+    default:
+      break;
+  }
+
+  // Number: use strtod so we support floats like 1.23, .5, 2.
+  if (isdigit((unsigned char)c) || c == '.') {
+    char *endp = NULL;
+    double v = strtod(lx->p, &endp);
+    if (endp == lx->p) {
+      // '.' not followed by digits, etc.
+      lx->p++;
+      return tok(TOK_ERR);
     }
-    t.kind = TOK_INT;
-    t.int_value = v;
+    lx->p = endp;
+    Token t = tok(TOK_NUM);
+    t.num_value = v;
     return t;
   }
 
   // Unknown char
   lx->p++;
-  t.kind = TOK_ERR;
-  return t;
+  return tok(TOK_ERR);
 }

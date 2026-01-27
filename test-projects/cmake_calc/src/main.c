@@ -3,7 +3,6 @@
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 static void usage(const char *prog) {
   fprintf(stderr,
@@ -69,15 +68,16 @@ int main(int argc, char **argv) {
     expr = owned;
   }
 
-  int out = 0;
-  int rc = calc_eval_int(expr, &out);
+  double out = 0.0;
+  int rc = calc_eval_double(expr, &out);
   if (rc != 0) {
     fprintf(stderr, "parse error (rc=%d)\n", rc);
     free(owned);
     return 1;
   }
 
-  printf("%d\n", out);
+  // Use %g: prints integers without trailing .0, but supports floats.
+  printf("%g\n", out);
   free(owned);
   return 0;
 }

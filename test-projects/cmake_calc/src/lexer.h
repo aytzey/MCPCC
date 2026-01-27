@@ -1,18 +1,20 @@
 #pragma once
 
 typedef enum {
-  TOK_INT,
+  TOK_NUM,
   TOK_PLUS,
   TOK_MINUS,
   TOK_MUL,
   TOK_DIV,
+  TOK_LPAREN,
+  TOK_RPAREN,
   TOK_EOF,
   TOK_ERR,
 } TokenKind;
 
 typedef struct {
   TokenKind kind;
-  int int_value;
+  double num_value;
 } Token;
 
 typedef struct {

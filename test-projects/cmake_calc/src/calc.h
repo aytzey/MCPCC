@@ -1,5 +1,5 @@
 #pragma once
 
-// Evaluate a simple expression containing + and - with integer literals.
-// Returns 0 on success.
-int calc_eval_int(const char *expr, int *out);
+// Evaluate an arithmetic expression with + - * /, parentheses, and floats.
+// Returns 0 on success; non-zero on parse/runtime error.
+int calc_eval_double(const char *expr, double *out);

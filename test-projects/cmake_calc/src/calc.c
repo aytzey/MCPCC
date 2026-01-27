@@ -3,38 +3,78 @@
 
 #include <stddef.h>
 
-// Evaluate expression with + - * / precedence (integer math).
+// Recursive descent parser with precedence and parentheses.
 // Grammar:
-//   expr   := term ((PLUS|MINUS) term)*
-//   term   := factor ((MUL|DIV) factor)*
-//   factor := INT
-static int parse_factor(Lexer *lx, int *out) {
-  Token t = lexer_next(lx);
-  if (t.kind != TOK_INT) return 2;
-  *out = t.int_value;
+//   expr    := term ((PLUS|MINUS) term)*
+//   term    := unary ((MUL|DIV) unary)*
+//   unary   := (PLUS|MINUS)* primary
+//   primary := NUM | '(' expr ')'
+
+typedef struct {
+  Lexer lx;
+  Token look;
+} Parser;
+
+static void parser_init(Parser *p, const char *input) {
+  lexer_init(&p->lx, input);
+  p->look = lexer_next(&p->lx);
+}
+
+static void consume(Parser *p) { p->look = lexer_next(&p->lx); }
+
+static int parse_expr(Parser *p, double *out); // fwd
+
+static int parse_primary(Parser *p, double *out) {
+  if (p->look.kind == TOK_NUM) {
+    *out = p->look.num_value;
+    consume(p);
+    return 0;
+  }
+
+  if (p->look.kind == TOK_LPAREN) {
+    consume(p);
+    int rc = parse_expr(p, out);
+    if (rc != 0) return rc;
+    if (p->look.kind != TOK_RPAREN) return 6; // missing ')'
+    consume(p);
+    return 0;
+  }
+
+  return 2; // expected primary
+}
+
+static int parse_unary(Parser *p, double *out) {
+  int sign = 1;
+  while (p->look.kind == TOK_PLUS || p->look.kind == TOK_MINUS) {
+    if (p->look.kind == TOK_MINUS) sign = -sign;
+    consume(p);
+  }
+
+  double v = 0.0;
+  int rc = parse_primary(p, &v);
+  if (rc != 0) return rc;
+  *out = sign * v;
   return 0;
 }
 
-static int parse_term(Lexer *lx, Token *lookahead, int *out) {
-  int acc = 0;
-  int rc = parse_factor(lx, &acc);
+static int parse_term(Parser *p, double *out) {
+  double acc = 0.0;
+  int rc = parse_unary(p, &acc);
   if (rc != 0) return rc;
 
   for (;;) {
-    Token op = lexer_next(lx);
-    if (op.kind != TOK_MUL && op.kind != TOK_DIV) {
-      *lookahead = op;
-      break;
-    }
+    TokenKind k = p->look.kind;
+    if (k != TOK_MUL && k != TOK_DIV) break;
+    consume(p);
 
-    int rhs = 0;
-    rc = parse_factor(lx, &rhs);
+    double rhs = 0.0;
+    rc = parse_unary(p, &rhs);
     if (rc != 0) return rc;
 
-    if (op.kind == TOK_MUL) {
+    if (k == TOK_MUL) {
       acc *= rhs;
     } else {
-      if (rhs == 0) return 5; // div by zero
+      if (rhs == 0.0) return 5; // div by zero
       acc /= rhs;
     }
   }
@@ -43,33 +83,43 @@ static int parse_term(Lexer *lx, Token *lookahead, int *out) {
   return 0;
 }
 
-int calc_eval_int(const char *expr, int *out) {
-  if (!expr || !out) return 1;
-
-  Lexer lx;
-  lexer_init(&lx, expr);
-
-  Token look = (Token){0};
-  int acc = 0;
-
-  // first term
-  int term = 0;
-  int rc = parse_term(&lx, &look, &term);
+static int parse_expr(Parser *p, double *out) {
+  double acc = 0.0;
+  int rc = parse_term(p, &acc);
   if (rc != 0) return rc;
-  acc = term;
 
   for (;;) {
-    Token op = look;
-    if (op.kind == TOK_EOF) break;
-    if (op.kind != TOK_PLUS && op.kind != TOK_MINUS) return 3;
+    TokenKind k = p->look.kind;
+    if (k != TOK_PLUS && k != TOK_MINUS) break;
+    consume(p);
 
-    rc = parse_term(&lx, &look, &term);
+    double rhs = 0.0;
+    rc = parse_term(p, &rhs);
     if (rc != 0) return rc;
 
-    if (op.kind == TOK_PLUS) acc += term;
-    else acc -= term;
+    if (k == TOK_PLUS) acc += rhs;
+    else acc -= rhs;
   }
 
   *out = acc;
+  return 0;
+}
+
+int calc_eval_double(const char *expr, double *out) {
+  if (!expr || !out) return 1;
+
+  Parser p;
+  parser_init(&p, expr);
+
+  double v = 0.0;
+  int rc = parse_expr(&p, &v);
+  if (rc != 0) return rc;
+
+  if (p.look.kind != TOK_EOF) {
+    // trailing junk
+    return 7;
+  }
+
+  *out = v;
   return 0;
 }
