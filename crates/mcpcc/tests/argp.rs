@@ -133,6 +133,26 @@ int main(int argc, char **argv) {
         .iter()
         .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("cli"))
         .expect("structured tool cli");
+
+    assert_eq!(v["binary"]["defaultCwd"], serde_json::Value::Null);
+    assert_eq!(
+        structured.get("title").and_then(|v| v.as_str()),
+        Some("Run cli")
+    );
+    assert!(
+        structured
+            .get("outputSchema")
+            .and_then(|v| v.as_object())
+            .is_some(),
+        "structured tool must have outputSchema"
+    );
+    assert_eq!(
+        structured
+            .get("x-mcpcc")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str()),
+        Some("structured")
+    );
     let exec = structured
         .get("x-mcpcc")
         .and_then(|v| v.get("exec"))
@@ -275,7 +295,7 @@ int main(int argc, char **argv) {
         structured
             .get("x-mcpcc")
             .and_then(|v| v.get("argvMapping"))
-            .and_then(|v| v.get("argsParam"))
+            .and_then(|v| v.get("positionalProperty"))
             .and_then(|v| v.as_str()),
         Some("args")
     );
@@ -284,6 +304,24 @@ int main(int argc, char **argv) {
         .iter()
         .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("cli.run_raw"))
         .expect("fallback tool cli.run_raw");
+    assert_eq!(
+        run_raw.get("title").and_then(|v| v.as_str()),
+        Some("Run cli (raw argv)")
+    );
+    assert!(
+        run_raw
+            .get("outputSchema")
+            .and_then(|v| v.as_object())
+            .is_some(),
+        "run_raw tool must have outputSchema"
+    );
+    assert_eq!(
+        run_raw
+            .get("x-mcpcc")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str()),
+        Some("run_raw")
+    );
     let exec = run_raw
         .get("x-mcpcc")
         .and_then(|v| v.get("exec"))

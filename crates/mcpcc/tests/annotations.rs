@@ -97,6 +97,26 @@ int main(void) { return 0; }
         .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("cli"))
         .expect("structured tool cli");
 
+    assert_eq!(v["binary"]["defaultCwd"], serde_json::Value::Null);
+    assert_eq!(
+        structured.get("title").and_then(|v| v.as_str()),
+        Some("Run cli")
+    );
+    assert!(
+        structured
+            .get("outputSchema")
+            .and_then(|v| v.as_object())
+            .is_some(),
+        "structured tool must have outputSchema"
+    );
+    assert_eq!(
+        structured
+            .get("x-mcpcc")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str()),
+        Some("structured")
+    );
+
     assert_eq!(
         structured.get("description").and_then(|v| v.as_str()),
         Some("Annotated tool")
@@ -207,6 +227,24 @@ int main(void) { return 0; }
         .iter()
         .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("cli.run_raw"))
         .expect("fallback tool cli.run_raw");
+    assert_eq!(
+        run_raw.get("title").and_then(|v| v.as_str()),
+        Some("Run cli (raw argv)")
+    );
+    assert!(
+        run_raw
+            .get("outputSchema")
+            .and_then(|v| v.as_object())
+            .is_some(),
+        "run_raw tool must have outputSchema"
+    );
+    assert_eq!(
+        run_raw
+            .get("x-mcpcc")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str()),
+        Some("run_raw")
+    );
     let exec = run_raw
         .get("x-mcpcc")
         .and_then(|v| v.get("exec"))

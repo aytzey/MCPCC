@@ -428,8 +428,9 @@ fn argv_from_structured_tool_call(
         .ok_or_else(|| "tool missing x-mcpcc.argvMapping.options".to_string())?;
 
     let args_param = mapping
-        .get("argsParam")
+        .get("positionalProperty")
         .and_then(|v| v.as_str())
+        .or_else(|| mapping.get("argsParam").and_then(|v| v.as_str()))
         .unwrap_or("args");
 
     let mut argv = Vec::new();

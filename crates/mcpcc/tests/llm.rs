@@ -49,8 +49,18 @@ struct CapturedRequest {
     body: String,
 }
 
-fn start_openrouter_mock(status: u16, body: String) -> (String, mpsc::Receiver<CapturedRequest>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+fn start_openrouter_mock(
+    status: u16,
+    body: String,
+) -> Option<(String, mpsc::Receiver<CapturedRequest>)> {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(v) => v,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping: sandbox disallows binding TCP listeners");
+            return None;
+        }
+        Err(err) => panic!("bind: {err}"),
+    };
     let addr = listener.local_addr().expect("addr");
     let (tx, rx) = mpsc::channel();
 
@@ -108,7 +118,7 @@ fn start_openrouter_mock(status: u16, body: String) -> (String, mpsc::Receiver<C
         stream.write_all(body_bytes).expect("write response body");
     });
 
-    (format!("http://{addr}"), rx)
+    Some((format!("http://{addr}"), rx))
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -177,7 +187,9 @@ fn required_mode_calls_openrouter_and_writes_cache_then_uses_cache_without_key()
     })
     .to_string();
 
-    let (base_url, rx) = start_openrouter_mock(200, response_body);
+    let Some((base_url, rx)) = start_openrouter_mock(200, response_body) else {
+        return;
+    };
 
     let bin = env!("CARGO_BIN_EXE_mcpcc");
     let out = Command::new(bin)
@@ -391,7 +403,9 @@ fn required_mode_openrouter_failure_exits_70() {
     let cache_dir = td.path.join("cache");
     let cc_path = link_fake_compiler(&td.path);
 
-    let (base_url, _rx) = start_openrouter_mock(500, "{}".to_string());
+    let Some((base_url, _rx)) = start_openrouter_mock(500, "{}".to_string()) else {
+        return;
+    };
 
     let bin = env!("CARGO_BIN_EXE_mcpcc");
     let out = Command::new(bin)

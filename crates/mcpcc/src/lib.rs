@@ -594,6 +594,78 @@ pub fn build_minimal_mcp_json(
     build_mcp_json(artifacts, descriptions, None)
 }
 
+fn default_tool_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "title": "mcpcc Tool Output",
+        "description": "Structured output produced under `structuredContent` for mcpcc tools.",
+        "properties": {
+            "stdout": { "type": "string" },
+            "stderr": { "type": "string" },
+            "exitCode": { "type": "integer" },
+            "durationMs": { "type": "integer" },
+            "timedOut": { "type": "boolean" },
+            "truncatedStdout": { "type": "boolean" },
+            "truncatedStderr": { "type": "boolean" },
+        },
+        "required": [
+            "stdout",
+            "stderr",
+            "exitCode",
+            "durationMs",
+            "timedOut",
+            "truncatedStdout",
+            "truncatedStderr",
+        ],
+        "additionalProperties": false,
+    })
+}
+
+fn ensure_prd_tool_defaults(tool: &mut serde_json::Value, kind: &str, default_title: &str) {
+    let Some(obj) = tool.as_object_mut() else {
+        return;
+    };
+
+    obj.entry("title".to_string())
+        .or_insert_with(|| serde_json::Value::String(default_title.to_string()));
+
+    obj.entry("outputSchema".to_string())
+        .or_insert_with(default_tool_output_schema);
+
+    let input_schema = obj
+        .entry("inputSchema".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !input_schema.is_object() {
+        *input_schema = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let input_obj = input_schema.as_object_mut().expect("inputSchema object");
+
+    input_obj
+        .entry("type".to_string())
+        .or_insert_with(|| serde_json::Value::String("object".to_string()));
+    let props = input_obj
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !props.is_object() {
+        *props = serde_json::Value::Object(serde_json::Map::new());
+    }
+    input_obj.insert(
+        "additionalProperties".to_string(),
+        serde_json::Value::Bool(false),
+    );
+
+    let x_mcpcc = obj
+        .entry("x-mcpcc".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !x_mcpcc.is_object() {
+        *x_mcpcc = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let x_obj = x_mcpcc.as_object_mut().expect("x-mcpcc object");
+    x_obj
+        .entry("kind".to_string())
+        .or_insert_with(|| serde_json::Value::String(kind.to_string()));
+}
+
 fn build_run_raw_tool_json(
     artifacts: &ArtifactPaths,
     descriptions: &LlmToolDescriptions,
@@ -606,7 +678,7 @@ fn build_run_raw_tool_json(
         .map(String::as_str)
         .unwrap_or("Arguments to pass to the binary as an argv array.");
 
-    serde_json::json!({
+    let mut tool = serde_json::json!({
         "name": tool_name,
         "description": descriptions.tool_description,
         "inputSchema": {
@@ -621,7 +693,9 @@ fn build_run_raw_tool_json(
             "required": ["argv"],
             "additionalProperties": false,
         },
-    })
+    });
+    ensure_prd_tool_defaults(&mut tool, "run_raw", &format!("Run {base_name} (raw argv)"));
+    tool
 }
 
 fn build_getopt_long_structured_tool_json(
@@ -677,7 +751,7 @@ fn build_getopt_long_structured_tool_json(
         mapping_options.push(serde_json::Value::Object(entry));
     }
 
-    serde_json::json!({
+    let mut tool = serde_json::json!({
         "name": base_name,
         "description": format!("Run {} with structured options.", base_name),
         "inputSchema": {
@@ -688,10 +762,12 @@ fn build_getopt_long_structured_tool_json(
         "x-mcpcc": {
             "argvMapping": {
                 "options": mapping_options,
-                "argsParam": "args",
+                "positionalProperty": "args",
             },
         },
-    })
+    });
+    ensure_prd_tool_defaults(&mut tool, "structured", &format!("Run {base_name}"));
+    tool
 }
 
 fn build_argp_structured_tool_json(
@@ -759,7 +835,7 @@ fn build_argp_structured_tool_json(
         mapping_options.push(serde_json::Value::Object(entry));
     }
 
-    serde_json::json!({
+    let mut tool = serde_json::json!({
         "name": base_name,
         "description": format!("Run {} with structured options.", base_name),
         "inputSchema": {
@@ -770,10 +846,12 @@ fn build_argp_structured_tool_json(
         "x-mcpcc": {
             "argvMapping": {
                 "options": mapping_options,
-                "argsParam": "args",
+                "positionalProperty": "args",
             },
         },
-    })
+    });
+    ensure_prd_tool_defaults(&mut tool, "structured", &format!("Run {base_name}"));
+    tool
 }
 
 pub fn build_mcp_json(
@@ -792,6 +870,7 @@ pub fn build_mcp_json(
         "mcpSpecVersion": MCP_SPEC_VERSION,
         "binary": {
             "path": artifacts.bin_path.to_string_lossy(),
+            "defaultCwd": serde_json::Value::Null,
         },
         "tools": tools,
     });
@@ -1401,17 +1480,19 @@ fn build_annotation_structured_tool_json(
         input_schema.insert("required".to_string(), serde_json::Value::Array(required));
     }
 
-    serde_json::json!({
+    let mut tool = serde_json::json!({
         "name": base_name,
         "description": format!("Run {} with structured options.", base_name),
         "inputSchema": serde_json::Value::Object(input_schema),
         "x-mcpcc": {
             "argvMapping": {
                 "options": mapping_options,
-                "argsParam": "args",
+                "positionalProperty": "args",
             },
         },
-    })
+    });
+    ensure_prd_tool_defaults(&mut tool, "structured", &format!("Run {base_name}"));
+    tool
 }
 
 fn count_tool_param_count(mcp_json: &serde_json::Value, tool_name: &str) -> Option<usize> {
