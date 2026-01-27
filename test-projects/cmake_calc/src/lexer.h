@@ -4,6 +4,8 @@ typedef enum {
   TOK_INT,
   TOK_PLUS,
   TOK_MINUS,
+  TOK_MUL,
+  TOK_DIV,
   TOK_EOF,
   TOK_ERR,
 } TokenKind;

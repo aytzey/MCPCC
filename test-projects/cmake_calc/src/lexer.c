@@ -29,6 +29,16 @@ Token lexer_next(Lexer *lx) {
     t.kind = TOK_MINUS;
     return t;
   }
+  if (c == '*') {
+    lx->p++;
+    t.kind = TOK_MUL;
+    return t;
+  }
+  if (c == '/') {
+    lx->p++;
+    t.kind = TOK_DIV;
+    return t;
+  }
 
   if (isdigit((unsigned char)c)) {
     int v = 0;
