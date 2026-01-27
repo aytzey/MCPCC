@@ -8,7 +8,7 @@ use object::{Object, ObjectSection};
 use sha2::{Digest, Sha256};
 
 pub const MCP_SPEC_VERSION: &str = "2025-11-25";
-pub const LLM_PROMPT_VERSION: &str = "v1";
+pub const LLM_PROMPT_VERSION: &str = "v2";
 pub const DEFAULT_LLM_MODEL: &str = "openai/gpt-4o-mini";
 const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
@@ -379,6 +379,11 @@ pub struct LlmToolDescriptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmBundleDescriptions {
+    pub tools: BTreeMap<String, LlmToolDescriptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmManifestInfo {
     pub mode: String,
     pub provider: String,
@@ -396,15 +401,7 @@ enum OptionArgRequirement {
     Optional,
 }
 
-impl OptionArgRequirement {
-    fn as_str(self) -> &'static str {
-        match self {
-            OptionArgRequirement::None => "none",
-            OptionArgRequirement::Required => "required",
-            OptionArgRequirement::Optional => "optional",
-        }
-    }
-}
+impl OptionArgRequirement {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GetoptLongOptionSpec {
@@ -439,6 +436,14 @@ pub struct AnalysisSummary {
     pub structured_tool_generated: bool,
     pub param_count: usize,
     pub notes: Vec<String>,
+}
+
+pub struct McpJsonPlan {
+    pub mcp_json: serde_json::Value,
+    pub analysis: AnalysisSummary,
+    pub llm_expected: BTreeMap<String, Vec<String>>,
+    pub llm_summary_json: String,
+    annotations: McpccAnnotations,
 }
 
 const MCPCC_ANNOT_SECTION: &str = ".mcpcc";
@@ -626,8 +631,13 @@ fn ensure_prd_tool_defaults(tool: &mut serde_json::Value, kind: &str, default_ti
         return;
     };
 
+    let inferred_title = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(default_title)
+        .to_string();
     obj.entry("title".to_string())
-        .or_insert_with(|| serde_json::Value::String(default_title.to_string()));
+        .or_insert_with(|| serde_json::Value::String(inferred_title));
 
     obj.entry("outputSchema".to_string())
         .or_insert_with(default_tool_output_schema);
@@ -694,7 +704,7 @@ fn build_run_raw_tool_json(
             "additionalProperties": false,
         },
     });
-    ensure_prd_tool_defaults(&mut tool, "run_raw", &format!("Run {base_name} (raw argv)"));
+    ensure_prd_tool_defaults(&mut tool, "raw", &tool_name);
     tool
 }
 
@@ -722,10 +732,10 @@ fn build_getopt_long_structured_tool_json(
     );
 
     let mut mapping_options = Vec::with_capacity(spec.options.len());
-    for opt in &spec.options {
+    for (idx, opt) in spec.options.iter().enumerate() {
         let mut entry = serde_json::Map::new();
         entry.insert(
-            "param".to_string(),
+            "property".to_string(),
             serde_json::Value::String(opt.long_name.clone()),
         );
         entry.insert(
@@ -733,19 +743,22 @@ fn build_getopt_long_structured_tool_json(
             serde_json::Value::String(format!("--{}", opt.long_name)),
         );
         entry.insert(
-            "arg".to_string(),
-            serde_json::Value::String(opt.long_arg.as_str().to_string()),
+            "takesValue".to_string(),
+            serde_json::Value::Bool(!matches!(opt.long_arg, OptionArgRequirement::None)),
+        );
+        entry.insert(
+            "valueStyle".to_string(),
+            serde_json::Value::String("separate".to_string()),
+        );
+        entry.insert("repeatable".to_string(), serde_json::Value::Bool(false));
+        entry.insert(
+            "position".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(idx)),
         );
         if let Some(short) = opt.short {
             entry.insert(
                 "short".to_string(),
                 serde_json::Value::String(format!("-{short}")),
-            );
-        }
-        if let Some(short_arg) = opt.short_arg {
-            entry.insert(
-                "shortArg".to_string(),
-                serde_json::Value::String(short_arg.as_str().to_string()),
             );
         }
         mapping_options.push(serde_json::Value::Object(entry));
@@ -766,7 +779,7 @@ fn build_getopt_long_structured_tool_json(
             },
         },
     });
-    ensure_prd_tool_defaults(&mut tool, "structured", &format!("Run {base_name}"));
+    ensure_prd_tool_defaults(&mut tool, "structured", &base_name);
     tool
 }
 
@@ -808,10 +821,10 @@ fn build_argp_structured_tool_json(
     );
 
     let mut mapping_options = Vec::with_capacity(spec.options.len());
-    for opt in &spec.options {
+    for (idx, opt) in spec.options.iter().enumerate() {
         let mut entry = serde_json::Map::new();
         entry.insert(
-            "param".to_string(),
+            "property".to_string(),
             serde_json::Value::String(opt.long_name.clone()),
         );
         entry.insert(
@@ -819,17 +832,22 @@ fn build_argp_structured_tool_json(
             serde_json::Value::String(format!("--{}", opt.long_name)),
         );
         entry.insert(
-            "arg".to_string(),
-            serde_json::Value::String(opt.arg_requirement.as_str().to_string()),
+            "takesValue".to_string(),
+            serde_json::Value::Bool(!matches!(opt.arg_requirement, OptionArgRequirement::None)),
+        );
+        entry.insert(
+            "valueStyle".to_string(),
+            serde_json::Value::String("separate".to_string()),
+        );
+        entry.insert("repeatable".to_string(), serde_json::Value::Bool(false));
+        entry.insert(
+            "position".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(idx)),
         );
         if let Some(short) = opt.short {
             entry.insert(
                 "short".to_string(),
                 serde_json::Value::String(format!("-{short}")),
-            );
-            entry.insert(
-                "shortArg".to_string(),
-                serde_json::Value::String(opt.arg_requirement.as_str().to_string()),
             );
         }
         mapping_options.push(serde_json::Value::Object(entry));
@@ -850,7 +868,7 @@ fn build_argp_structured_tool_json(
             },
         },
     });
-    ensure_prd_tool_defaults(&mut tool, "structured", &format!("Run {base_name}"));
+    ensure_prd_tool_defaults(&mut tool, "structured", &base_name);
     tool
 }
 
@@ -1125,18 +1143,6 @@ fn annotation_schema_type(annotation: &ParamAnnotation) -> Option<&'static str> 
         .map(|takes_value| if takes_value { "string" } else { "boolean" })
 }
 
-fn annotation_arg_requirement(annotation: &ParamAnnotation) -> Option<&'static str> {
-    if annotation.ty.is_none() && annotation.takes_value.is_none() {
-        return None;
-    }
-
-    match annotation_schema_type(annotation) {
-        Some("boolean") => Some("none"),
-        Some(_) => Some("required"),
-        None => None,
-    }
-}
-
 fn apply_tool_annotation(tool: &mut serde_json::Value, annotation: &ToolAnnotation) -> bool {
     let Some(obj) = tool.as_object_mut() else {
         return false;
@@ -1274,7 +1280,12 @@ fn apply_param_annotation(tool: &mut serde_json::Value, annotation: &ParamAnnota
         let Some(opt_map) = opt.as_object_mut() else {
             continue;
         };
-        if opt_map.get("param").and_then(|v| v.as_str()) == Some(annotation.property.as_str()) {
+        let matches = opt_map
+            .get("property")
+            .or_else(|| opt_map.get("param"))
+            .and_then(|v| v.as_str())
+            == Some(annotation.property.as_str());
+        if matches {
             option_obj = Some(opt_map);
             break;
         }
@@ -1283,7 +1294,7 @@ fn apply_param_annotation(tool: &mut serde_json::Value, annotation: &ParamAnnota
     if option_obj.is_none() {
         let mut new = serde_json::Map::new();
         new.insert(
-            "param".to_string(),
+            "property".to_string(),
             serde_json::Value::String(annotation.property.clone()),
         );
         let long = annotation
@@ -1294,29 +1305,31 @@ fn apply_param_annotation(tool: &mut serde_json::Value, annotation: &ParamAnnota
         if let Some(short) = annotation.short.clone() {
             new.insert("short".to_string(), serde_json::Value::String(short));
         }
-        if let Some(arg) = annotation_arg_requirement(annotation) {
-            new.insert(
-                "arg".to_string(),
-                serde_json::Value::String(arg.to_string()),
-            );
-            if new.get("short").is_some() {
-                new.insert(
-                    "shortArg".to_string(),
-                    serde_json::Value::String(arg.to_string()),
-                );
-            }
-        }
-        if let Some(repeatable) = annotation.repeatable {
-            new.insert(
-                "repeatable".to_string(),
-                serde_json::Value::Bool(repeatable),
-            );
-        }
+        let schema_type = annotation_schema_type(annotation).unwrap_or("string");
+        let takes_value = annotation
+            .takes_value
+            .unwrap_or_else(|| schema_type != "boolean");
+        new.insert(
+            "takesValue".to_string(),
+            serde_json::Value::Bool(takes_value),
+        );
+        new.insert(
+            "valueStyle".to_string(),
+            serde_json::Value::String("separate".to_string()),
+        );
+        new.insert(
+            "repeatable".to_string(),
+            serde_json::Value::Bool(annotation.repeatable.unwrap_or(false)),
+        );
         options.push(serde_json::Value::Object(new));
         return true;
     }
 
     let opt_map = option_obj.expect("option object");
+    opt_map.insert(
+        "property".to_string(),
+        serde_json::Value::String(annotation.property.clone()),
+    );
     if let Some(long) = annotation.long.as_ref() {
         opt_map.insert("long".to_string(), serde_json::Value::String(long.clone()));
         changed = true;
@@ -1336,17 +1349,11 @@ fn apply_param_annotation(tool: &mut serde_json::Value, annotation: &ParamAnnota
         changed = true;
     }
 
-    if let Some(arg) = annotation_arg_requirement(annotation) {
+    if let Some(takes_value) = annotation.takes_value {
         opt_map.insert(
-            "arg".to_string(),
-            serde_json::Value::String(arg.to_string()),
+            "takesValue".to_string(),
+            serde_json::Value::Bool(takes_value),
         );
-        if opt_map.get("short").is_some() {
-            opt_map.insert(
-                "shortArg".to_string(),
-                serde_json::Value::String(arg.to_string()),
-            );
-        }
         changed = true;
     }
 
@@ -1391,7 +1398,7 @@ fn build_annotation_structured_tool_json(
     let mut required = Vec::new();
 
     let mut mapping_options = Vec::new();
-    for annotation in params {
+    for (idx, annotation) in params.iter().enumerate() {
         let Some(schema_type) = annotation_schema_type(annotation).or(Some("string")) else {
             continue;
         };
@@ -1417,7 +1424,7 @@ fn build_annotation_structured_tool_json(
 
         let mut entry = serde_json::Map::new();
         entry.insert(
-            "param".to_string(),
+            "property".to_string(),
             serde_json::Value::String(annotation.property.clone()),
         );
         let long = annotation
@@ -1429,29 +1436,22 @@ fn build_annotation_structured_tool_json(
         if let Some(short) = annotation.short.clone() {
             entry.insert("short".to_string(), serde_json::Value::String(short));
         }
-        let arg = annotation_arg_requirement(annotation).unwrap_or_else(|| {
-            if schema_type == "boolean" {
-                "none"
-            } else {
-                "required"
-            }
-        });
         entry.insert(
-            "arg".to_string(),
-            serde_json::Value::String(arg.to_string()),
+            "takesValue".to_string(),
+            serde_json::Value::Bool(annotation.takes_value.unwrap_or(schema_type != "boolean")),
         );
-        if entry.get("short").is_some() {
-            entry.insert(
-                "shortArg".to_string(),
-                serde_json::Value::String(arg.to_string()),
-            );
-        }
-        if let Some(repeatable) = annotation.repeatable {
-            entry.insert(
-                "repeatable".to_string(),
-                serde_json::Value::Bool(repeatable),
-            );
-        }
+        entry.insert(
+            "valueStyle".to_string(),
+            serde_json::Value::String("separate".to_string()),
+        );
+        entry.insert(
+            "repeatable".to_string(),
+            serde_json::Value::Bool(annotation.repeatable.unwrap_or(false)),
+        );
+        entry.insert(
+            "position".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(idx)),
+        );
         mapping_options.push(serde_json::Value::Object(entry));
     }
 
@@ -1491,7 +1491,7 @@ fn build_annotation_structured_tool_json(
             },
         },
     });
-    ensure_prd_tool_defaults(&mut tool, "structured", &format!("Run {base_name}"));
+    ensure_prd_tool_defaults(&mut tool, "structured", &base_name);
     tool
 }
 
@@ -1506,9 +1506,314 @@ fn count_tool_param_count(mcp_json: &serde_json::Value, tool_name: &str) -> Opti
 
 pub fn write_mcp_json_atomic(
     artifacts: &ArtifactPaths,
-    descriptions: &LlmToolDescriptions,
+    plan: &McpJsonPlan,
+) -> Result<(), JsonWriteError> {
+    write_json_atomic(&artifacts.mcp_json_path, &plan.mcp_json)?;
+    Ok(())
+}
+
+fn llm_expected_from_mcp_json(mcp_json: &serde_json::Value) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    let Some(tools) = mcp_json.get("tools").and_then(|v| v.as_array()) else {
+        return out;
+    };
+
+    for tool in tools {
+        let Some(tool_name) = tool.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let mut params = Vec::<String>::new();
+        if let Some(mapping) = tool
+            .get("x-mcpcc")
+            .and_then(|v| v.get("argvMapping"))
+            .and_then(|v| v.as_object())
+        {
+            if let Some(options) = mapping.get("options").and_then(|v| v.as_array()) {
+                for opt in options {
+                    let Some(opt_obj) = opt.as_object() else {
+                        continue;
+                    };
+                    let Some(prop) = opt_obj
+                        .get("property")
+                        .or_else(|| opt_obj.get("param"))
+                        .and_then(|v| v.as_str())
+                    else {
+                        continue;
+                    };
+                    params.push(prop.to_string());
+                }
+            }
+            let positional = mapping
+                .get("positionalProperty")
+                .or_else(|| mapping.get("argsParam"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("args");
+            if !params.iter().any(|p| p == positional) {
+                params.push(positional.to_string());
+            }
+        } else if let Some(props) = tool
+            .get("inputSchema")
+            .and_then(|v| v.get("properties"))
+            .and_then(|v| v.as_object())
+        {
+            params.extend(props.keys().cloned());
+            params.sort();
+            if let Some(args_idx) = params.iter().position(|p| p == "args") {
+                let args = params.remove(args_idx);
+                params.push(args);
+            }
+        }
+
+        out.insert(tool_name.to_string(), params);
+    }
+
+    out
+}
+
+fn guessed_type_from_schema(schema: &serde_json::Value) -> String {
+    let Some(obj) = schema.as_object() else {
+        return "unknown".to_string();
+    };
+    let Some(ty) = obj.get("type").and_then(|v| v.as_str()) else {
+        return "unknown".to_string();
+    };
+    if ty == "array" {
+        let item_ty = obj
+            .get("items")
+            .and_then(|v| v.as_object())
+            .and_then(|v| v.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return format!("array<{item_ty}>");
+    }
+    ty.to_string()
+}
+
+fn truncate_llm_doc(value: &str) -> String {
+    const MAX: usize = 160;
+    let trimmed = value.trim();
+    let mut out = String::new();
+    let mut count = 0usize;
+    for ch in trimmed.chars() {
+        if count >= MAX {
+            break;
+        }
+        out.push(ch);
+        count += 1;
+    }
+    out
+}
+
+fn llm_bundle_analysis_summary_json(artifacts: &ArtifactPaths, plan: &McpJsonPlan) -> String {
+    let binary_name = tool_base_name_for_artifacts(artifacts);
+
+    let mut tools_summary = Vec::new();
+    let tools = plan
+        .mcp_json
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for tool in tools {
+        let Some(tool_name) = tool.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(expected_params) = plan.llm_expected.get(tool_name) else {
+            continue;
+        };
+
+        let mut mapping_by_property: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        if let Some(options) = tool
+            .get("x-mcpcc")
+            .and_then(|v| v.get("argvMapping"))
+            .and_then(|v| v.get("options"))
+            .and_then(|v| v.as_array())
+        {
+            for opt in options {
+                let Some(opt_obj) = opt.as_object() else {
+                    continue;
+                };
+                let Some(prop) = opt_obj
+                    .get("property")
+                    .or_else(|| opt_obj.get("param"))
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                mapping_by_property.insert(prop.to_string(), opt.clone());
+            }
+        }
+
+        let props = tool
+            .get("inputSchema")
+            .and_then(|v| v.get("properties"))
+            .and_then(|v| v.as_object());
+
+        let mut params_summary = Vec::new();
+        for param in expected_params {
+            let schema = props
+                .and_then(|p| p.get(param))
+                .cloned()
+                .unwrap_or_default();
+            let guessed_type = guessed_type_from_schema(&schema);
+            let doc = schema
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(truncate_llm_doc);
+
+            let (long, short, takes_value) = mapping_by_property
+                .get(param)
+                .and_then(|v| v.as_object())
+                .map(|opt| {
+                    let long = opt.get("long").and_then(|v| v.as_str()).map(str::to_string);
+                    let short = opt
+                        .get("short")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let takes_value = opt
+                        .get("takesValue")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or_else(|| guessed_type != "boolean");
+                    (long, short, takes_value)
+                })
+                .unwrap_or_else(|| {
+                    let takes_value = guessed_type != "boolean";
+                    (None, None, takes_value)
+                });
+
+            params_summary.push(serde_json::json!({
+                "property": param,
+                "long": long,
+                "short": short,
+                "takesValue": takes_value,
+                "optionalArg": takes_value,
+                "guessedType": guessed_type,
+                "doc": doc.unwrap_or_default(),
+            }));
+        }
+
+        tools_summary.push(serde_json::json!({
+            "toolName": tool_name,
+            "binaryName": binary_name,
+            "params": params_summary,
+        }));
+    }
+
+    serde_json::json!({
+        "binaryName": binary_name,
+        "tools": tools_summary,
+    })
+    .to_string()
+}
+
+fn tool_annotation_overrides_description(annotations: &McpccAnnotations, tool: &str) -> bool {
+    annotations.tools.iter().any(|a| {
+        a.name == tool
+            && a.description
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_some()
+    })
+}
+
+fn param_annotation_overrides_description(
+    annotations: &McpccAnnotations,
+    tool: &str,
+    property: &str,
+) -> bool {
+    annotations.params.iter().any(|a| {
+        a.tool == tool
+            && a.property == property
+            && a.description
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_some()
+    })
+}
+
+impl McpJsonPlan {
+    pub fn apply_llm_descriptions(&mut self, descriptions: &LlmBundleDescriptions) {
+        let Some(tools) = self
+            .mcp_json
+            .get_mut("tools")
+            .and_then(|v| v.as_array_mut())
+        else {
+            return;
+        };
+
+        for tool in tools {
+            let Some(tool_name) = tool
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let Some(desc) = descriptions.tools.get(tool_name.as_str()) else {
+                continue;
+            };
+
+            if !tool_annotation_overrides_description(&self.annotations, tool_name.as_str()) {
+                if let Some(obj) = tool.as_object_mut() {
+                    obj.insert(
+                        "description".to_string(),
+                        serde_json::Value::String(desc.tool_description.clone()),
+                    );
+                }
+            }
+
+            let Some(props) = tool
+                .get_mut("inputSchema")
+                .and_then(|v| v.get_mut("properties"))
+                .and_then(|v| v.as_object_mut())
+            else {
+                continue;
+            };
+
+            let overwrite_param_descriptions = tool_name.ends_with(TOOL_RUN_RAW_SUFFIX);
+            for (param, param_desc) in &desc.params {
+                if param_annotation_overrides_description(
+                    &self.annotations,
+                    tool_name.as_str(),
+                    param,
+                ) {
+                    continue;
+                }
+                let entry = props
+                    .entry(param.clone())
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                if !entry.is_object() {
+                    *entry = serde_json::Value::Object(serde_json::Map::new());
+                }
+                let schema_obj = entry.as_object_mut().expect("schema object");
+                if !overwrite_param_descriptions {
+                    if schema_obj
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .is_some()
+                    {
+                        continue;
+                    }
+                }
+                schema_obj.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(param_desc.clone()),
+                );
+            }
+        }
+    }
+}
+
+pub fn plan_mcp_json(
+    artifacts: &ArtifactPaths,
     passthrough: &[String],
-) -> Result<AnalysisSummary, JsonWriteError> {
+) -> Result<McpJsonPlan, JsonWriteError> {
     let (argp_spec, mut notes) = try_extract_argp_spec(passthrough);
     let (getopt_long_spec, getopt_long_notes) = if argp_spec.is_some() {
         (None, Vec::new())
@@ -1556,7 +1861,8 @@ pub fn write_mcp_json_atomic(
         }
     }
 
-    let mut mcp_json = build_mcp_json(artifacts, descriptions, structured_tool);
+    let placeholder = placeholder_run_raw_descriptions();
+    let mut mcp_json = build_mcp_json(artifacts, &placeholder, structured_tool);
     let used_annotations = apply_annotations_to_mcp_json(&mut mcp_json, &annotations);
     if used_annotations && !analysis.extractors.iter().any(|e| e == "annotation") {
         analysis.extractors.insert(0, "annotation".to_string());
@@ -1567,9 +1873,18 @@ pub fn write_mcp_json_atomic(
         }
     }
 
-    write_json_atomic(&artifacts.mcp_json_path, &mcp_json)?;
+    let llm_expected = llm_expected_from_mcp_json(&mcp_json);
 
-    Ok(analysis)
+    let mut plan = McpJsonPlan {
+        mcp_json,
+        analysis,
+        llm_expected,
+        llm_summary_json: String::new(),
+        annotations,
+    };
+    plan.llm_summary_json = llm_bundle_analysis_summary_json(artifacts, &plan);
+
+    Ok(plan)
 }
 
 pub fn build_manifest_json(
@@ -1640,19 +1955,21 @@ pub fn write_manifest_json_atomic(
     Ok(())
 }
 
-pub fn generate_run_raw_llm_descriptions(
-    artifacts: &ArtifactPaths,
+pub fn generate_llm_descriptions(
     wrapper: &WrapperFlags,
     llm_env: &LlmEnv,
-) -> Result<(LlmToolDescriptions, LlmManifestInfo), LlmError> {
+    analysis_summary_json: &str,
+    expected: &BTreeMap<String, Vec<String>>,
+) -> Result<(LlmBundleDescriptions, LlmManifestInfo), LlmError> {
     let provider = "openrouter".to_string();
     let mode = wrapper.llm_mode;
     let model = resolve_llm_model(wrapper);
     let prompt_version = LLM_PROMPT_VERSION.to_string();
+    let placeholder = placeholder_bundle_descriptions(expected);
 
     if mode == LlmMode::Off {
         return Ok((
-            placeholder_run_raw_descriptions(),
+            placeholder,
             LlmManifestInfo {
                 mode: mode.as_str().to_string(),
                 provider,
@@ -1665,12 +1982,11 @@ pub fn generate_run_raw_llm_descriptions(
         ));
     }
 
-    let analysis_summary_json = run_raw_analysis_summary_json(&artifacts.base_name);
     let cache_dir = resolve_cache_dir(wrapper);
-    let cache_key = llm_cache_key_hex(LLM_PROMPT_VERSION, &model, analysis_summary_json.as_str());
+    let cache_key = llm_cache_key_hex(LLM_PROMPT_VERSION, &model, analysis_summary_json);
     let cache_path = cache_dir.join("llm").join(format!("{cache_key}.json"));
 
-    if let Ok(descriptions) = read_llm_cache(&cache_path) {
+    if let Ok(descriptions) = read_llm_cache(&cache_path, expected) {
         return Ok((
             descriptions,
             LlmManifestInfo {
@@ -1697,7 +2013,7 @@ pub fn generate_run_raw_llm_descriptions(
                 return Err(LlmError::MissingApiKey);
             }
             return Ok((
-                placeholder_run_raw_descriptions(),
+                placeholder,
                 LlmManifestInfo {
                     mode: mode.as_str().to_string(),
                     provider,
@@ -1716,12 +2032,19 @@ pub fn generate_run_raw_llm_descriptions(
         .as_deref()
         .unwrap_or(DEFAULT_OPENROUTER_BASE_URL);
 
-    match call_openrouter(api_key, base_url, &model, analysis_summary_json.as_str()) {
+    match call_openrouter(api_key, base_url, &model, analysis_summary_json, expected) {
         Ok(descriptions) => {
-            let cache_value = serde_json::json!({
-                "toolDescription": descriptions.tool_description.clone(),
-                "params": descriptions.params.clone(),
-            });
+            let mut tools_obj = serde_json::Map::new();
+            for (tool_name, tool_desc) in &descriptions.tools {
+                tools_obj.insert(
+                    tool_name.clone(),
+                    serde_json::json!({
+                        "toolDescription": tool_desc.tool_description.clone(),
+                        "params": tool_desc.params.clone(),
+                    }),
+                );
+            }
+            let cache_value = serde_json::json!({ "tools": tools_obj });
             write_json_atomic(&cache_path, &cache_value)?;
             Ok((
                 descriptions,
@@ -1741,7 +2064,7 @@ pub fn generate_run_raw_llm_descriptions(
                 return Err(err);
             }
             Ok((
-                placeholder_run_raw_descriptions(),
+                placeholder,
                 LlmManifestInfo {
                     mode: mode.as_str().to_string(),
                     provider,
@@ -1831,16 +2154,6 @@ fn default_cache_dir() -> PathBuf {
     PathBuf::from(".mcpcc-cache")
 }
 
-fn run_raw_analysis_summary_json(base_name: &str) -> String {
-    let base_name = normalize_tool_base_name(base_name);
-    let run_raw_name = run_raw_tool_name_from_base(&base_name);
-    serde_json::json!({
-        "toolName": run_raw_name,
-        "params": ["argv"],
-    })
-    .to_string()
-}
-
 fn llm_cache_key_hex(prompt_version: &str, model: &str, analysis_summary_json: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(prompt_version.as_bytes());
@@ -1855,6 +2168,58 @@ fn llm_cache_key_hex(prompt_version: &str, model: &str, analysis_summary_json: &
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+fn placeholder_bundle_descriptions(
+    expected: &BTreeMap<String, Vec<String>>,
+) -> LlmBundleDescriptions {
+    let mut tools = BTreeMap::new();
+
+    for (tool_name, params) in expected {
+        let mut param_desc = BTreeMap::new();
+        for param in params {
+            let desc = match param.as_str() {
+                "argv" => "Arguments to pass to the binary as an argv array.",
+                "args" => "Positional arguments to pass after options.",
+                other => {
+                    if tool_name.ends_with(TOOL_RUN_RAW_SUFFIX) {
+                        "Tool parameter."
+                    } else {
+                        // Keep this short; placeholders are only used for best-effort/off.
+                        // Include the name so it's more informative.
+                        return_desc_for_placeholder(other)
+                    }
+                }
+            };
+            param_desc.insert(param.clone(), desc.to_string());
+        }
+
+        let tool_description = if tool_name.ends_with(TOOL_RUN_RAW_SUFFIX) {
+            "Run the target binary with raw argv and return stdout/stderr/exit code.".to_string()
+        } else {
+            "Run the target binary with structured options and return stdout/stderr/exit code."
+                .to_string()
+        };
+
+        tools.insert(
+            tool_name.clone(),
+            LlmToolDescriptions {
+                tool_description,
+                params: param_desc,
+            },
+        );
+    }
+
+    LlmBundleDescriptions { tools }
+}
+
+fn return_desc_for_placeholder(param: &str) -> &'static str {
+    // A tiny set of better defaults without inflating output.
+    match param {
+        "help" => "Show help/usage information.",
+        "verbose" => "Enable verbose output.",
+        _ => "Tool option value.",
+    }
 }
 
 fn placeholder_run_raw_descriptions() -> LlmToolDescriptions {
@@ -1885,49 +2250,81 @@ fn sanitize_description(value: &str) -> Option<String> {
     (count >= 5).then_some(out)
 }
 
-fn parse_run_raw_llm_output(value: &serde_json::Value) -> Result<LlmToolDescriptions, LlmError> {
+fn parse_bundle_llm_output(
+    value: &serde_json::Value,
+    expected: &BTreeMap<String, Vec<String>>,
+) -> Result<LlmBundleDescriptions, LlmError> {
     let obj = value
         .as_object()
         .ok_or_else(|| LlmError::InvalidOutput("LLM output must be a JSON object".to_string()))?;
 
-    let tool_description_raw = obj
-        .get("toolDescription")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            LlmError::InvalidOutput("LLM output missing toolDescription string".to_string())
-        })?;
-    let Some(tool_description) = sanitize_description(tool_description_raw) else {
-        return Err(LlmError::InvalidOutput(
-            "toolDescription must be 5–240 characters".to_string(),
-        ));
-    };
-
-    let params_obj = obj
-        .get("params")
+    let tools_obj = obj
+        .get("tools")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| LlmError::InvalidOutput("LLM output missing params object".to_string()))?;
-    let argv_raw = params_obj
-        .get("argv")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            LlmError::InvalidOutput("LLM output missing params.argv string".to_string())
+        .ok_or_else(|| LlmError::InvalidOutput("LLM output missing tools object".to_string()))?;
+
+    let mut tools = BTreeMap::new();
+    for (tool_name, expected_params) in expected {
+        let tool_val = tools_obj.get(tool_name).ok_or_else(|| {
+            LlmError::InvalidOutput(format!("LLM output missing tools.{tool_name} object"))
         })?;
-    let Some(argv_description) = sanitize_description(argv_raw) else {
-        return Err(LlmError::InvalidOutput(
-            "params.argv must be 5–240 characters".to_string(),
-        ));
-    };
+        let tool_obj = tool_val.as_object().ok_or_else(|| {
+            LlmError::InvalidOutput(format!("tools.{tool_name} must be a JSON object"))
+        })?;
 
-    let mut params = BTreeMap::new();
-    params.insert("argv".to_string(), argv_description);
+        let tool_description_raw = tool_obj
+            .get("toolDescription")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                LlmError::InvalidOutput(format!("tools.{tool_name}.toolDescription missing string"))
+            })?;
+        let Some(tool_description) = sanitize_description(tool_description_raw) else {
+            return Err(LlmError::InvalidOutput(format!(
+                "tools.{tool_name}.toolDescription must be 5–240 characters"
+            )));
+        };
 
-    Ok(LlmToolDescriptions {
-        tool_description,
-        params,
-    })
+        let params_obj = tool_obj
+            .get("params")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| {
+                LlmError::InvalidOutput(format!("tools.{tool_name}.params missing object"))
+            })?;
+
+        let mut params = BTreeMap::new();
+        for param in expected_params {
+            let raw = params_obj
+                .get(param)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    LlmError::InvalidOutput(format!(
+                        "tools.{tool_name}.params.{param} missing string"
+                    ))
+                })?;
+            let Some(desc) = sanitize_description(raw) else {
+                return Err(LlmError::InvalidOutput(format!(
+                    "tools.{tool_name}.params.{param} must be 5–240 characters"
+                )));
+            };
+            params.insert(param.clone(), desc);
+        }
+
+        tools.insert(
+            tool_name.clone(),
+            LlmToolDescriptions {
+                tool_description,
+                params,
+            },
+        );
+    }
+
+    Ok(LlmBundleDescriptions { tools })
 }
 
-fn parse_llm_output_str(content: &str) -> Result<LlmToolDescriptions, LlmError> {
+fn parse_llm_output_str(
+    content: &str,
+    expected: &BTreeMap<String, Vec<String>>,
+) -> Result<LlmBundleDescriptions, LlmError> {
     let content = content.trim();
 
     let parsed: serde_json::Value = match serde_json::from_str(content) {
@@ -1948,13 +2345,16 @@ fn parse_llm_output_str(content: &str) -> Result<LlmToolDescriptions, LlmError> 
         }
     };
 
-    parse_run_raw_llm_output(&parsed)
+    parse_bundle_llm_output(&parsed, expected)
 }
 
-fn read_llm_cache(path: &Path) -> Result<LlmToolDescriptions, LlmError> {
+fn read_llm_cache(
+    path: &Path,
+    expected: &BTreeMap<String, Vec<String>>,
+) -> Result<LlmBundleDescriptions, LlmError> {
     let bytes = std::fs::read(path)?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    parse_run_raw_llm_output(&value)
+    parse_bundle_llm_output(&value, expected)
 }
 
 fn call_openrouter(
@@ -1962,19 +2362,23 @@ fn call_openrouter(
     base_url: &str,
     model: &str,
     analysis_summary_json: &str,
-) -> Result<LlmToolDescriptions, LlmError> {
+    expected: &BTreeMap<String, Vec<String>>,
+) -> Result<LlmBundleDescriptions, LlmError> {
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/chat/completions");
 
     let system_prompt = concat!(
-        "You generate short plain-text descriptions for an MCP tool. ",
-        "Return ONLY a JSON object with keys: toolDescription (string) and params (object). ",
+        "You generate short plain-text descriptions for an MCP tool bundle. ",
+        "Return ONLY a JSON object with key: tools (object). ",
+        "tools maps toolName to an object with keys: toolDescription (string) and params (object). ",
+        "Include every toolName from analysis_summary_json and every listed param. ",
+        "Output only those tools/params (no extras). ",
         "Do not use markdown or code fences. ",
         "All descriptions must be 5–240 characters after trimming.",
     );
     let user_prompt = format!(
         "analysis_summary_json:\n{analysis_summary_json}\n\nReturn JSON: \
-{{\"toolDescription\":\"...\",\"params\":{{\"argv\":\"...\"}}}}"
+{{\"tools\":{{\"toolName\":{{\"toolDescription\":\"...\",\"params\":{{\"param\":\"...\"}}}}}}}}"
     );
 
     let body = serde_json::json!({
@@ -2027,7 +2431,7 @@ fn call_openrouter(
             )
         })?;
 
-    parse_llm_output_str(content)
+    parse_llm_output_str(content, expected)
 }
 
 fn strip_c_comments(input: &str) -> String {

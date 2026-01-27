@@ -137,7 +137,7 @@ int main(int argc, char **argv) {
     assert_eq!(v["binary"]["defaultCwd"], serde_json::Value::Null);
     assert_eq!(
         structured.get("title").and_then(|v| v.as_str()),
-        Some("Run cli")
+        Some("cli")
     );
     assert!(
         structured
@@ -249,42 +249,66 @@ int main(int argc, char **argv) {
         .expect("x-mcpcc.argvMapping.options array");
     assert_eq!(opts.len(), 3, "expected 3 extracted options");
 
-    assert_eq!(opts[0].get("param").and_then(|v| v.as_str()), Some("help"));
-    assert_eq!(opts[0].get("arg").and_then(|v| v.as_str()), Some("none"));
     assert_eq!(
-        opts[0].get("shortArg").and_then(|v| v.as_str()),
-        Some("none")
+        opts[0].get("property").and_then(|v| v.as_str()),
+        Some("help")
     );
+    assert_eq!(
+        opts[0].get("takesValue").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        opts[0].get("valueStyle").and_then(|v| v.as_str()),
+        Some("separate")
+    );
+    assert_eq!(
+        opts[0].get("repeatable").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(opts[0].get("position").and_then(|v| v.as_i64()), Some(0));
     assert_eq!(opts[0].get("short").and_then(|v| v.as_str()), Some("-h"));
     assert_eq!(opts[0].get("long").and_then(|v| v.as_str()), Some("--help"));
 
     assert_eq!(
-        opts[1].get("param").and_then(|v| v.as_str()),
+        opts[1].get("property").and_then(|v| v.as_str()),
         Some("output")
     );
     assert_eq!(
-        opts[1].get("arg").and_then(|v| v.as_str()),
-        Some("required")
+        opts[1].get("takesValue").and_then(|v| v.as_bool()),
+        Some(true)
     );
     assert_eq!(
-        opts[1].get("shortArg").and_then(|v| v.as_str()),
-        Some("required")
+        opts[1].get("valueStyle").and_then(|v| v.as_str()),
+        Some("separate")
     );
+    assert_eq!(
+        opts[1].get("repeatable").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(opts[1].get("position").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(opts[1].get("short").and_then(|v| v.as_str()), Some("-o"));
     assert_eq!(
         opts[1].get("long").and_then(|v| v.as_str()),
         Some("--output")
     );
 
-    assert_eq!(opts[2].get("param").and_then(|v| v.as_str()), Some("color"));
     assert_eq!(
-        opts[2].get("arg").and_then(|v| v.as_str()),
-        Some("optional")
+        opts[2].get("property").and_then(|v| v.as_str()),
+        Some("color")
     );
     assert_eq!(
-        opts[2].get("shortArg").and_then(|v| v.as_str()),
-        Some("optional")
+        opts[2].get("takesValue").and_then(|v| v.as_bool()),
+        Some(true)
     );
+    assert_eq!(
+        opts[2].get("valueStyle").and_then(|v| v.as_str()),
+        Some("separate")
+    );
+    assert_eq!(
+        opts[2].get("repeatable").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(opts[2].get("position").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(opts[2].get("short").and_then(|v| v.as_str()), Some("-c"));
     assert_eq!(
         opts[2].get("long").and_then(|v| v.as_str()),
@@ -306,7 +330,7 @@ int main(int argc, char **argv) {
         .expect("fallback tool cli.run_raw");
     assert_eq!(
         run_raw.get("title").and_then(|v| v.as_str()),
-        Some("Run cli (raw argv)")
+        Some("cli.run_raw")
     );
     assert!(
         run_raw
@@ -320,7 +344,7 @@ int main(int argc, char **argv) {
             .get("x-mcpcc")
             .and_then(|v| v.get("kind"))
             .and_then(|v| v.as_str()),
-        Some("run_raw")
+        Some("raw")
     );
     let exec = run_raw
         .get("x-mcpcc")

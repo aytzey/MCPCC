@@ -87,14 +87,28 @@ fn main() -> ExitCode {
     }
 
     if let Some(artifacts) = artifacts {
-        let (descriptions, llm_manifest) =
-            match mcpcc::generate_run_raw_llm_descriptions(&artifacts, &parsed.wrapper, &llm_env) {
-                Ok(v) => v,
-                Err(err) => {
-                    eprintln!("mcpcc: failed to generate LLM descriptions: {err}");
-                    return ExitCode::from(70);
-                }
-            };
+        let mut plan = match mcpcc::plan_mcp_json(&artifacts, &parsed.passthrough) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("mcpcc: failed to plan mcp.json: {err}");
+                return ExitCode::from(70);
+            }
+        };
+
+        let (descriptions, llm_manifest) = match mcpcc::generate_llm_descriptions(
+            &parsed.wrapper,
+            &llm_env,
+            &plan.llm_summary_json,
+            &plan.llm_expected,
+        ) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("mcpcc: failed to generate LLM descriptions: {err}");
+                return ExitCode::from(70);
+            }
+        };
+
+        plan.apply_llm_descriptions(&descriptions);
 
         if parsed.wrapper.verbose {
             eprintln!(
@@ -110,14 +124,11 @@ fn main() -> ExitCode {
             }
         }
 
-        let analysis =
-            match mcpcc::write_mcp_json_atomic(&artifacts, &descriptions, &parsed.passthrough) {
-                Ok(v) => v,
-                Err(err) => {
-                    eprintln!("mcpcc: failed to write mcp.json: {err}");
-                    return ExitCode::from(70);
-                }
-            };
+        let analysis = plan.analysis.clone();
+        if let Err(err) = mcpcc::write_mcp_json_atomic(&artifacts, &plan) {
+            eprintln!("mcpcc: failed to write mcp.json: {err}");
+            return ExitCode::from(70);
+        }
         if parsed.wrapper.verbose {
             if analysis.structured_tool_generated && !analysis.extractors.is_empty() {
                 eprintln!(

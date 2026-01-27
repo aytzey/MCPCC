@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -174,9 +174,13 @@ fn required_mode_calls_openrouter_and_writes_cache_then_uses_cache_without_key()
 
     let model = "test-model";
     let content_json = serde_json::json!({
-        "toolDescription": "Run the program with raw argv.",
-        "params": {
-            "argv": "Program arguments (argv array)."
+        "tools": {
+            "hello.run_raw": {
+                "toolDescription": "Run the program with raw argv.",
+                "params": {
+                    "argv": "Program arguments (argv array)."
+                }
+            }
         }
     })
     .to_string();
@@ -239,8 +243,20 @@ fn required_mode_calls_openrouter_and_writes_cache_then_uses_cache_without_key()
     );
 
     let analysis_summary_json = serde_json::json!({
-        "toolName": "hello.run_raw",
-        "params": ["argv"],
+        "binaryName": "hello",
+        "tools": [{
+            "toolName": "hello.run_raw",
+            "binaryName": "hello",
+            "params": [{
+                "property": "argv",
+                "long": null,
+                "short": null,
+                "takesValue": true,
+                "optionalArg": true,
+                "guessedType": "array<string>",
+                "doc": "Arguments to pass to the binary as an argv array."
+            }]
+        }]
     })
     .to_string();
     let cache_key = sha256_hex(&format!(
@@ -444,4 +460,77 @@ fn required_mode_openrouter_failure_exits_70() {
         !td.path.join("bin/hello.mcpcc-manifest.json").exists(),
         "failed LLM should not write manifest"
     );
+}
+
+#[test]
+fn required_mode_real_openrouter_smoke() {
+    let api_key = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .and_then(|v| (!v.trim().is_empty()).then_some(v));
+    if api_key.is_none() {
+        eprintln!("skipping: OPENROUTER_API_KEY not set");
+        return;
+    }
+    if ("openrouter.ai", 443).to_socket_addrs().is_err() {
+        eprintln!("skipping: cannot resolve openrouter.ai (DNS/network unavailable)");
+        return;
+    }
+
+    let td = TempDir::new("mcpcc-llm-required-real");
+    let cache_dir = td.path.join("cache");
+    let cc_path = link_fake_compiler(&td.path);
+
+    let bin = env!("CARGO_BIN_EXE_mcpcc");
+    let out = Command::new(bin)
+        .current_dir(&td.path)
+        .env("OPENROUTER_API_KEY", api_key.unwrap())
+        .env_remove("MCPCC_OPENROUTER_BASE_URL")
+        .arg("--mcpcc-cc")
+        .arg(&cc_path)
+        .arg("--mcpcc-cache-dir")
+        .arg(&cache_dir)
+        .arg("--mcpcc-llm-mode")
+        .arg("required")
+        .arg("--")
+        .arg("hello.c")
+        .arg("-o")
+        .arg("bin/hello")
+        .output()
+        .expect("run mcpcc");
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("Dns Failed") || stderr.contains("failed to lookup address") {
+            eprintln!("skipping: OpenRouter unreachable (DNS/network unavailable)");
+            return;
+        }
+        panic!(
+            "expected exit 0, got: {:?}\nstdout: {}\nstderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            stderr
+        );
+    }
+
+    let manifest_path = td.path.join("bin/hello.mcpcc-manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    let llm = manifest
+        .get("llm")
+        .and_then(|v| v.as_object())
+        .expect("llm");
+    assert_eq!(llm.get("mode").and_then(|v| v.as_str()), Some("required"));
+    assert_eq!(
+        llm.get("usedPlaceholder").and_then(|v| v.as_bool()),
+        Some(false),
+        "expected a real OpenRouter call (no placeholder)"
+    );
+
+    let llm_dir = cache_dir.join("llm");
+    let cache_files: Vec<_> = std::fs::read_dir(&llm_dir)
+        .expect("read cache llm dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(!cache_files.is_empty(), "expected LLM cache files");
 }

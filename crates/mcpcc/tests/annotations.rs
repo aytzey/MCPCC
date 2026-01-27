@@ -100,7 +100,7 @@ int main(void) { return 0; }
     assert_eq!(v["binary"]["defaultCwd"], serde_json::Value::Null);
     assert_eq!(
         structured.get("title").and_then(|v| v.as_str()),
-        Some("Run cli")
+        Some("cli")
     );
     assert!(
         structured
@@ -203,25 +203,31 @@ int main(void) { return 0; }
 
     let verbose = opts
         .iter()
-        .find(|o| o.get("param").and_then(|v| v.as_str()) == Some("verbose"))
+        .find(|o| o.get("property").and_then(|v| v.as_str()) == Some("verbose"))
         .expect("verbose option");
     assert_eq!(
         verbose.get("long").and_then(|v| v.as_str()),
         Some("--verbose")
     );
     assert_eq!(verbose.get("short").and_then(|v| v.as_str()), Some("-v"));
-    assert_eq!(verbose.get("arg").and_then(|v| v.as_str()), Some("none"));
+    assert_eq!(
+        verbose.get("takesValue").and_then(|v| v.as_bool()),
+        Some(false)
+    );
 
     let output = opts
         .iter()
-        .find(|o| o.get("param").and_then(|v| v.as_str()) == Some("output"))
+        .find(|o| o.get("property").and_then(|v| v.as_str()) == Some("output"))
         .expect("output option");
     assert_eq!(
         output.get("long").and_then(|v| v.as_str()),
         Some("--output")
     );
     assert_eq!(output.get("short").and_then(|v| v.as_str()), Some("-o"));
-    assert_eq!(output.get("arg").and_then(|v| v.as_str()), Some("required"));
+    assert_eq!(
+        output.get("takesValue").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     let run_raw = tools
         .iter()
@@ -229,7 +235,7 @@ int main(void) { return 0; }
         .expect("fallback tool cli.run_raw");
     assert_eq!(
         run_raw.get("title").and_then(|v| v.as_str()),
-        Some("Run cli (raw argv)")
+        Some("cli.run_raw")
     );
     assert!(
         run_raw
@@ -243,7 +249,7 @@ int main(void) { return 0; }
             .get("x-mcpcc")
             .and_then(|v| v.get("kind"))
             .and_then(|v| v.as_str()),
-        Some("run_raw")
+        Some("raw")
     );
     let exec = run_raw
         .get("x-mcpcc")
@@ -376,8 +382,12 @@ int main(int argc, char **argv) {
         .expect("x-mcpcc.argvMapping.options array");
     let help = opts
         .iter()
-        .find(|o| o.get("param").and_then(|v| v.as_str()) == Some("help"))
+        .find(|o| o.get("property").and_then(|v| v.as_str()) == Some("help"))
         .expect("help option");
     assert_eq!(help.get("long").and_then(|v| v.as_str()), Some("--assist"));
     assert_eq!(help.get("short").and_then(|v| v.as_str()), Some("-x"));
+    assert_eq!(
+        help.get("takesValue").and_then(|v| v.as_bool()),
+        Some(false)
+    );
 }
