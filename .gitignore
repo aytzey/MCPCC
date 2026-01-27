@@ -1,3 +1,7 @@
 scripts/ralph/.last-branch
 scripts/ralph/.codex-last-message*.txt
 target/
+
+# e2e artifacts
+.e2e-out/
+.e2e-out-test/
