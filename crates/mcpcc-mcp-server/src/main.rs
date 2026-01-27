@@ -440,14 +440,15 @@ fn argv_from_structured_tool_call(
             return Err("invalid x-mcpcc.argvMapping.options entry (expected object)".to_string());
         };
 
-        let param = opt_obj
-            .get("param")
+        let property = opt_obj
+            .get("property")
+            .or_else(|| opt_obj.get("param"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                "invalid x-mcpcc.argvMapping.options entry: missing param".to_string()
+                "invalid x-mcpcc.argvMapping.options entry: missing property".to_string()
             })?;
 
-        let Some(value) = arguments.get(param) else {
+        let Some(value) = arguments.get(property) else {
             continue;
         };
 
@@ -456,36 +457,40 @@ fn argv_from_structured_tool_call(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let (flag, arg_requirement) =
-            if let Some(long) = opt_obj.get("long").and_then(|v| v.as_str()) {
-                let arg = opt_obj
-                    .get("arg")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("none");
-                (long, arg)
-            } else if let Some(short) = opt_obj.get("short").and_then(|v| v.as_str()) {
-                let arg = opt_obj
-                    .get("shortArg")
-                    .or_else(|| opt_obj.get("arg"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("none");
-                (short, arg)
+        let flag = if let Some(long) = opt_obj.get("long").and_then(|v| v.as_str()) {
+            long
+        } else if let Some(short) = opt_obj.get("short").and_then(|v| v.as_str()) {
+            short
+        } else {
+            return Err(format!(
+                "invalid x-mcpcc.argvMapping.options entry for {property}: missing long/short"
+            ));
+        };
+
+        let arg_requirement = if let Some(arg) = opt_obj.get("arg").and_then(|v| v.as_str()) {
+            arg
+        } else if let Some(takes_value) = opt_obj.get("takesValue").and_then(|v| v.as_bool()) {
+            if takes_value {
+                "optional"
             } else {
-                return Err(format!(
-                    "invalid x-mcpcc.argvMapping.options entry for {param}: missing long/short"
-                ));
-            };
+                "none"
+            }
+        } else if value.is_boolean() {
+            "none"
+        } else {
+            "optional"
+        };
 
         if repeatable {
             if let Some(values) = value.as_array() {
                 for entry in values {
-                    apply_option_value(&mut argv, param, flag, arg_requirement, entry)?;
+                    apply_option_value(&mut argv, property, flag, arg_requirement, entry)?;
                 }
             } else {
-                apply_option_value(&mut argv, param, flag, arg_requirement, value)?;
+                apply_option_value(&mut argv, property, flag, arg_requirement, value)?;
             }
         } else {
-            apply_option_value(&mut argv, param, flag, arg_requirement, value)?;
+            apply_option_value(&mut argv, property, flag, arg_requirement, value)?;
         }
     }
 
