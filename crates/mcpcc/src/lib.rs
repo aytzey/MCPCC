@@ -872,6 +872,24 @@ fn build_argp_structured_tool_json(
     tool
 }
 
+fn binary_path_for_mcp_json(bin_path: &Path) -> String {
+    // `std::process::Command::new("foo")` searches PATH. It does NOT execute `./foo`.
+    // Our server currently calls Command::new(binary.path) without setting cwd.
+    // So for bare relative filenames like `calc`, we must emit `./calc`.
+    if bin_path.is_absolute() {
+        return bin_path.to_string_lossy().to_string();
+    }
+
+    // If it is a single path component ("calc"), prefix "./".
+    if bin_path.components().count() == 1 {
+        return format!("./{}", bin_path.to_string_lossy());
+    }
+
+    // If it has a parent but still no separators via Path rules, keep it.
+    // (e.g. "bin/calc" should work as a relative path because it contains a separator)
+    bin_path.to_string_lossy().to_string()
+}
+
 pub fn build_mcp_json(
     artifacts: &ArtifactPaths,
     descriptions: &LlmToolDescriptions,
@@ -887,7 +905,7 @@ pub fn build_mcp_json(
         "mcpccVersion": env!("CARGO_PKG_VERSION"),
         "mcpSpecVersion": MCP_SPEC_VERSION,
         "binary": {
-            "path": artifacts.bin_path.to_string_lossy(),
+            "path": binary_path_for_mcp_json(&artifacts.bin_path),
             "defaultCwd": serde_json::Value::Null,
         },
         "tools": tools,
@@ -3065,21 +3083,7 @@ fn extract_getopt_long_spec_from_file(path: &Path) -> Result<GetoptLongSpec, Str
 
 fn try_extract_getopt_long_spec(passthrough: &[String]) -> (Option<GetoptLongSpec>, Vec<String>) {
     let mut notes = Vec::new();
-    let candidates: Vec<PathBuf> = passthrough
-        .iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .map(PathBuf::from)
-        .filter(|path| {
-            if !path.exists() {
-                return false;
-            }
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or_default();
-            matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C")
-        })
-        .collect();
+    let candidates: Vec<PathBuf> = collect_source_candidates(passthrough);
 
     for path in candidates {
         match extract_getopt_long_spec_from_file(&path) {
@@ -3487,23 +3491,72 @@ fn extract_argp_spec_from_file(path: &Path) -> Result<ArgpSpec, String> {
     Ok(ArgpSpec { options })
 }
 
+fn collect_source_candidates(passthrough: &[String]) -> Vec<PathBuf> {
+    // In simple invocations, the link command contains .c/.cpp files directly.
+    // In CMake multi-file projects, the final link step usually contains only object files,
+    // commonly named like: CMakeFiles/<tgt>.dir/src/main.c.o
+    // We can often recover the original source path by stripping the trailing `.o`.
+    let mut out = Vec::new();
+
+    for arg in passthrough.iter().filter(|arg| !arg.starts_with('-')) {
+        let p = PathBuf::from(arg);
+
+        // Direct source.
+        if p.exists() {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C") {
+                out.push(p);
+                continue;
+            }
+        }
+
+        // Object file with embedded source extension: `something.c.o` → try to recover `something.c`.
+        // CMake often produces: CMakeFiles/<tgt>.dir/<relpath>.c.o
+        // where <relpath>.c is relative to the *source* dir, not the build dir.
+        if let Some(s) = p.to_str() {
+            if s.ends_with(".o") {
+                let stem = &s[..s.len() - 2];
+
+                // 1) Direct sibling (works for some build systems).
+                let direct = PathBuf::from(stem);
+                if direct.exists() {
+                    let ext = direct.extension().and_then(|e| e.to_str()).unwrap_or_default();
+                    if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C") {
+                        out.push(direct);
+                        continue;
+                    }
+                }
+
+                // 2) CMake heuristic: take the portion after `.dir/` and search upwards.
+                if let Some(pos) = stem.find(".dir/") {
+                    let rel = &stem[(pos + 5)..]; // after `.dir/`
+                    // rel likely ends with `.c` / `.cpp` etc.
+                    let mut base = PathBuf::from("..");
+                    for _ in 0..4 {
+                        let cand = base.join(rel);
+                        if cand.exists() {
+                            let ext = cand.extension().and_then(|e| e.to_str()).unwrap_or_default();
+                            if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C") {
+                                out.push(cand);
+                                break;
+                            }
+                        }
+                        base = base.join("..");
+                    }
+                }
+            }
+        }
+    }
+
+    // Preserve determinism.
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn try_extract_argp_spec(passthrough: &[String]) -> (Option<ArgpSpec>, Vec<String>) {
     let mut notes = Vec::new();
-    let candidates: Vec<PathBuf> = passthrough
-        .iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .map(PathBuf::from)
-        .filter(|path| {
-            if !path.exists() {
-                return false;
-            }
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or_default();
-            matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C")
-        })
-        .collect();
+    let candidates: Vec<PathBuf> = collect_source_candidates(passthrough);
 
     for path in candidates {
         match extract_argp_spec_from_file(&path) {

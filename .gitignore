@@ -5,3 +5,6 @@ target/
 # e2e artifacts
 .e2e-out/
 .e2e-out-test/
+
+# test projects
+test-projects/**/build/
