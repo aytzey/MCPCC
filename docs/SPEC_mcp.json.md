@@ -130,3 +130,30 @@ Embedded via `mcpcc_annot.h` into the `.mcpcc` ELF section, prefixed
 Merge priority: annotation > argp/getopt extraction > fallback. LLM-generated
 descriptions never overwrite annotation-provided descriptions, and never
 overwrite extractor doc strings on structured tools.
+
+## Extractor notes
+
+The getopt extractor recognizes `getopt_long`, `getopt_long_only`, and PJLIB's
+`pj_getopt_long` call shapes, with option tables declared as `struct option`
+or `struct pj_getopt_option` (identical layouts). `has_arg` may be symbolic
+(`no_argument`/…) or numeric (`0`/`1`/`2`). Duplicate long names keep the first
+occurrence.
+
+### Source discovery at link time
+
+Extractors need source files, but link lines often contain only objects.
+mcpcc recovers sources in this order per `.o` argument:
+
+1. `<obj>.o.mcpcc-src` sidecar — written by mcpcc itself during the matching
+   `-c` compile step (one absolute source path per line). Covers autoconf/make
+   trees. Sidecars are advisory: writing them never fails the build, and stale
+   ones are simply re-written on the next compile.
+2. `something.c.o` → `something.c` sibling (object name embeds the extension).
+3. CMake heuristic: `CMakeFiles/<tgt>.dir/<relpath>.c.o` → search `<relpath>.c`
+   upwards from the build dir.
+
+### LLM contract bounds
+
+Per tool, at most 128 parameters are sent to (and expected back from) the LLM;
+overflow is recorded in the manifest notes and the remaining schema properties
+keep their extractor/placeholder descriptions.

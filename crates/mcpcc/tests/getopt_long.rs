@@ -41,6 +41,126 @@ fn write_exe(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
 }
 
 #[test]
+fn generates_structured_tool_from_pj_getopt_long() {
+    let td = TempDir::new("mcpcc-pj-getopt-long");
+    let cache_dir = td.path.join("cache");
+
+    let cc_path = write_exe(
+        &td.path,
+        "fakecc",
+        br#"#!/bin/sh
+set -eu
+out="a.out"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out="$a"
+    prev=""
+    continue
+  fi
+  case "$a" in
+    -o) prev="-o" ;;
+    -o*) out="${a#-o}" ;;
+  esac
+done
+mkdir -p "$(dirname "$out")"
+: > "$out"
+exit 0
+"#,
+    );
+
+    // Mirrors pjsua's CLI parsing: PJLIB's own getopt reimplementation with
+    // numeric has_arg values, enum (non-char) `val` fields, an empty
+    // optstring, and a duplicated entry.
+    let source = br#"
+#include <pjlib-util.h>
+
+enum { OPT_CONFIG_FILE, OPT_LOG_LEVEL, OPT_LOG_APPEND };
+
+static int parse_args(int argc, char *argv[]) {
+  struct pj_getopt_option long_options[] = {
+    { "config-file", 1, 0, OPT_CONFIG_FILE},
+    { "log-level",   1, 0, OPT_LOG_LEVEL},
+    { "log-append",  0, 0, OPT_LOG_APPEND},
+    { "log-level",   1, 0, OPT_LOG_LEVEL},
+    { NULL, 0, 0, 0}
+  };
+  int c, option_index;
+  pj_optind = 0;
+  while ((c = pj_getopt_long(argc, argv, "", long_options, &option_index)) != -1) {
+    (void)c;
+  }
+  return 0;
+}
+
+int main(int argc, char *argv[]) { return parse_args(argc, argv); }
+"#;
+    std::fs::write(td.path.join("pjcli.c"), source).expect("write pjcli.c");
+
+    let bin = env!("CARGO_BIN_EXE_mcpcc");
+    let out = Command::new(bin)
+        .current_dir(&td.path)
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("MCPCC_OPENROUTER_BASE_URL")
+        .arg("--mcpcc-cc")
+        .arg(&cc_path)
+        .arg("--mcpcc-llm-mode")
+        .arg("best-effort")
+        .arg("--mcpcc-cache-dir")
+        .arg(&cache_dir)
+        .arg("--")
+        .arg("pjcli.c")
+        .arg("-o")
+        .arg("bin/pjcli")
+        .output()
+        .expect("run mcpcc");
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got: {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let contents = std::fs::read(td.path.join("bin/pjcli.mcp.json")).expect("read mcp json");
+    let v: serde_json::Value = serde_json::from_slice(&contents).expect("parse json");
+    let tools = v
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .expect("tools array");
+    let structured = tools
+        .iter()
+        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("pjcli"))
+        .expect("structured tool pjcli");
+
+    let opts = structured
+        .get("x-mcpcc")
+        .and_then(|v| v.get("argvMapping"))
+        .and_then(|v| v.get("options"))
+        .and_then(|v| v.as_array())
+        .expect("argvMapping.options array");
+    let names: Vec<&str> = opts
+        .iter()
+        .filter_map(|o| o.get("property").and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        ["config-file", "log-level", "log-append"],
+        "duplicate long names must be deduped, order preserved"
+    );
+    assert_eq!(
+        opts[0].get("arg").and_then(|v| v.as_str()),
+        Some("required"),
+        "numeric has_arg=1 must map to required"
+    );
+    assert_eq!(
+        opts[2].get("arg").and_then(|v| v.as_str()),
+        Some("none"),
+        "numeric has_arg=0 must map to a flag"
+    );
+}
+
+#[test]
 fn generates_structured_tool_from_getopt_long() {
     let td = TempDir::new("mcpcc-getopt-long");
     let cache_dir = td.path.join("cache");

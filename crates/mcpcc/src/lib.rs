@@ -1721,15 +1721,6 @@ fn llm_bundle_analysis_summary_json(
         let Some(expected_params) = llm_expected.get(tool_name) else {
             continue;
         };
-        let expected_params = if expected_params.len() > LLM_SUMMARY_MAX_PARAMS_PER_TOOL {
-            notes.push(format!(
-                "llm summary truncated for {tool_name}: {} params capped to {LLM_SUMMARY_MAX_PARAMS_PER_TOOL}",
-                expected_params.len()
-            ));
-            &expected_params[..LLM_SUMMARY_MAX_PARAMS_PER_TOOL]
-        } else {
-            expected_params.as_slice()
-        };
 
         let mut mapping_by_property: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         if let Some(options) = tool
@@ -2003,9 +1994,23 @@ pub fn plan_mcp_json(
         }
     }
 
-    let llm_expected = llm_expected_from_mcp_json(&mcp_json);
+    let mut llm_expected = llm_expected_from_mcp_json(&mcp_json);
 
     let mut summary_notes = Vec::new();
+    // PRD §10.4: bound the LLM contract per tool. The cap must apply to the
+    // expected-params list itself (not just the prompt summary), otherwise
+    // required-mode validation would demand descriptions for params the model
+    // never saw.
+    for (tool_name, params) in llm_expected.iter_mut() {
+        if params.len() > LLM_SUMMARY_MAX_PARAMS_PER_TOOL {
+            summary_notes.push(format!(
+                "llm params capped for {tool_name}: {} -> {LLM_SUMMARY_MAX_PARAMS_PER_TOOL}",
+                params.len()
+            ));
+            params.truncate(LLM_SUMMARY_MAX_PARAMS_PER_TOOL);
+        }
+    }
+
     let llm_summary_json =
         llm_bundle_analysis_summary_json(artifacts, &mcp_json, &llm_expected, &mut summary_notes);
     analysis.notes.extend(summary_notes);
@@ -2992,9 +2997,22 @@ fn parse_c_char_literal(expr: &str) -> Option<char> {
     Some(ch)
 }
 
+/// Function names recognized as getopt_long-style parsers. `pj_getopt_long`
+/// (PJSIP/PJLIB) is a verbatim reimplementation with the same call shape and a
+/// `struct pj_getopt_option` table identical to glibc's `struct option`.
+const GETOPT_LONG_CALL_NAMES: [&str; 3] = ["getopt_long", "getopt_long_only", "pj_getopt_long"];
+
 fn parse_getopt_long_call(source: &str) -> Option<(String, String)> {
-    const NAME: &str = "getopt_long";
-    for (idx, _) in source.match_indices(NAME) {
+    for name in GETOPT_LONG_CALL_NAMES {
+        if let Some(found) = parse_named_getopt_long_call(source, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn parse_named_getopt_long_call(source: &str, name: &str) -> Option<(String, String)> {
+    for (idx, _) in source.match_indices(name) {
         let before_ok = idx == 0
             || !source[..idx]
                 .chars()
@@ -3003,7 +3021,7 @@ fn parse_getopt_long_call(source: &str) -> Option<(String, String)> {
         if !before_ok {
             continue;
         }
-        let after_idx = idx + NAME.len();
+        let after_idx = idx + name.len();
         let after_ok = after_idx == source.len()
             || !source[after_idx..]
                 .chars()
@@ -3026,15 +3044,21 @@ fn parse_getopt_long_call(source: &str) -> Option<(String, String)> {
             continue;
         }
 
-        let close = find_matching_delimiter(source, cursor, '(', ')')?;
+        let Some(close) = find_matching_delimiter(source, cursor, '(', ')') else {
+            continue;
+        };
         let inner = &source[(cursor + 1)..close];
         let args = split_top_level(inner, ',');
         if args.len() < 4 {
             continue;
         }
 
-        let optstring = parse_c_string_literal_expr(&args[2])?;
-        let long_options_ident = parse_c_identifier(&args[3])?;
+        let Some(optstring) = parse_c_string_literal_expr(&args[2]) else {
+            continue;
+        };
+        let Some(long_options_ident) = parse_c_identifier(&args[3]) else {
+            continue;
+        };
         return Some((optstring, long_options_ident));
     }
     None
@@ -3091,9 +3115,15 @@ fn parse_struct_option_array(
     source: &str,
     ident: &str,
 ) -> Result<Vec<GetoptLongOptionSpec>, String> {
-    const NEEDLE: &str = "struct option";
-    for (idx, _) in source.match_indices(NEEDLE) {
-        let after = idx + NEEDLE.len();
+    // `struct pj_getopt_option` (PJLIB) has the exact same field layout as
+    // glibc's `struct option`: { name, has_arg, flag, val }.
+    const NEEDLES: [&str; 2] = ["struct option", "struct pj_getopt_option"];
+    for (idx, needle) in NEEDLES.iter().flat_map(|needle| {
+        source
+            .match_indices(needle)
+            .map(move |(idx, _)| (idx, *needle))
+    }) {
+        let after = idx + needle.len();
         let mut cursor = after;
         while let Some(ch) = source[cursor..].chars().next() {
             if ch.is_whitespace() {
@@ -3209,12 +3239,20 @@ fn parse_struct_option_array(
                                     )
                                 })?;
                                 let short = parse_c_char_literal(&fields[3]);
-                                options.push(GetoptLongOptionSpec {
-                                    long_name: name,
-                                    long_arg,
-                                    short,
-                                    short_arg: None,
-                                });
+                                // Tables occasionally repeat a long name (e.g. across
+                                // #if branches); the first occurrence wins so the
+                                // schema property and argv mapping stay unambiguous.
+                                let duplicate = options
+                                    .iter()
+                                    .any(|o: &GetoptLongOptionSpec| o.long_name == name);
+                                if !duplicate {
+                                    options.push(GetoptLongOptionSpec {
+                                        long_name: name,
+                                        long_arg,
+                                        short,
+                                        short_arg: None,
+                                    });
+                                }
                             }
                         }
                     }
@@ -3663,6 +3701,71 @@ fn extract_argp_spec_from_file(path: &Path) -> Result<ArgpSpec, String> {
     Ok(ArgpSpec { options })
 }
 
+fn is_source_path(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C")
+}
+
+/// Sidecar file written next to each object during `-c` compile steps so the
+/// link step can recover the original sources (`<obj>.o` → `<obj>.o.mcpcc-src`).
+const SOURCE_SIDECAR_SUFFIX: &str = ".mcpcc-src";
+
+fn source_sidecar_path(obj_path: &Path) -> PathBuf {
+    let mut os = obj_path.as_os_str().to_os_string();
+    os.push(SOURCE_SIDECAR_SUFFIX);
+    PathBuf::from(os)
+}
+
+/// Best-effort recording of which sources produced which object file during a
+/// `-c` compile step. Build systems like autoconf/make emit link lines made of
+/// plain `name.o` objects, so without this the extractors never see the
+/// sources. Never fails the build.
+pub fn record_compile_step_sources(passthrough: &[String]) {
+    if !passthrough.iter().any(|arg| arg == "-c") {
+        return;
+    }
+
+    let sources: Vec<PathBuf> = passthrough
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .map(PathBuf::from)
+        .filter(|p| p.exists() && is_source_path(p))
+        .collect();
+    if sources.is_empty() {
+        return;
+    }
+
+    if let Some(out) = parse_output_path(passthrough) {
+        write_source_sidecar(Path::new(&out), &sources);
+        return;
+    }
+
+    // Without `-o`, the compiler derives `<stem>.o` in the cwd per input.
+    for src in &sources {
+        if let Some(stem) = src.file_stem() {
+            let obj = PathBuf::from(format!("{}.o", stem.to_string_lossy()));
+            write_source_sidecar(&obj, std::slice::from_ref(src));
+        }
+    }
+}
+
+fn write_source_sidecar(obj_path: &Path, sources: &[PathBuf]) {
+    let mut contents = String::new();
+    for src in sources {
+        let abs = std::fs::canonicalize(src).unwrap_or_else(|_| {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(src))
+                .unwrap_or_else(|_| src.clone())
+        });
+        contents.push_str(&abs.to_string_lossy());
+        contents.push('\n');
+    }
+    let _ = std::fs::write(source_sidecar_path(obj_path), contents);
+}
+
 fn collect_source_candidates(passthrough: &[String]) -> Vec<PathBuf> {
     // In simple invocations, the link command contains .c/.cpp files directly.
     // In CMake multi-file projects, the final link step usually contains only object files,
@@ -3674,48 +3777,48 @@ fn collect_source_candidates(passthrough: &[String]) -> Vec<PathBuf> {
         let p = PathBuf::from(arg);
 
         // Direct source.
-        if p.exists() {
-            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default();
-            if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C") {
-                out.push(p);
-                continue;
-            }
+        if p.exists() && is_source_path(&p) {
+            out.push(p);
+            continue;
         }
 
-        // Object file with embedded source extension: `something.c.o` → try to recover `something.c`.
-        // CMake often produces: CMakeFiles/<tgt>.dir/<relpath>.c.o
-        // where <relpath>.c is relative to the *source* dir, not the build dir.
         if let Some(s) = p.to_str() {
             if let Some(stem) = s.strip_suffix(".o") {
-                // 1) Direct sibling (works for some build systems).
-                let direct = PathBuf::from(stem);
-                if direct.exists() {
-                    let ext = direct
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or_default();
-                    if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C") {
-                        out.push(direct);
+                // 1) Sidecar written by mcpcc during the compile step. This is
+                //    the precise mapping and covers autoconf/make trees whose
+                //    object names carry no source hint (e.g. pjsip).
+                if let Ok(contents) = std::fs::read_to_string(source_sidecar_path(&p)) {
+                    let mut found = false;
+                    for line in contents.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                        let cand = PathBuf::from(line);
+                        if cand.exists() && is_source_path(&cand) {
+                            out.push(cand);
+                            found = true;
+                        }
+                    }
+                    if found {
                         continue;
                     }
                 }
 
-                // 2) CMake heuristic: take the portion after `.dir/` and search upwards.
+                // 2) Object with embedded source extension (`something.c.o`):
+                //    direct sibling works for some build systems.
+                let direct = PathBuf::from(stem);
+                if direct.exists() && is_source_path(&direct) {
+                    out.push(direct);
+                    continue;
+                }
+
+                // 3) CMake heuristic: CMakeFiles/<tgt>.dir/<relpath>.c.o, where
+                //    <relpath>.c is relative to the *source* dir. Search upwards.
                 if let Some(pos) = stem.find(".dir/") {
-                    let rel = &stem[(pos + 5)..]; // after `.dir/`
-                                                  // rel likely ends with `.c` / `.cpp` etc.
+                    let rel = &stem[(pos + 5)..];
                     let mut base = PathBuf::from("..");
                     for _ in 0..4 {
                         let cand = base.join(rel);
-                        if cand.exists() {
-                            let ext = cand
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or_default();
-                            if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C") {
-                                out.push(cand);
-                                break;
-                            }
+                        if cand.exists() && is_source_path(&cand) {
+                            out.push(cand);
+                            break;
                         }
                         base = base.join("..");
                     }
@@ -3989,6 +4092,10 @@ pub enum CompilerResolveError {
         source: CompilerSource,
         spec: String,
     },
+    SelfRecursion {
+        source: CompilerSource,
+        spec: String,
+    },
     NoCompilerFound,
 }
 
@@ -3998,6 +4105,11 @@ impl std::fmt::Display for CompilerResolveError {
             CompilerResolveError::NotFound { source, spec } => {
                 write!(f, "compiler not found for {source}: {spec}")
             }
+            CompilerResolveError::SelfRecursion { source, spec } => write!(
+                f,
+                "refusing to use mcpcc itself as the underlying compiler ({source}: {spec}); \
+point {source} at a real compiler such as gcc or clang"
+            ),
             CompilerResolveError::NoCompilerFound => write!(
                 f,
                 "no compiler found (tried: --mcpcc-cc, MCPCC_CC, CC, clang, gcc)"
@@ -4029,42 +4141,65 @@ pub fn resolve_underlying_compiler(
     wrapper: &WrapperFlags,
     env: &EnvSnapshot,
 ) -> Result<PathBuf, CompilerResolveError> {
-    if let Some(spec) = wrapper.cc.as_deref() {
-        return resolve_spec(spec, env.path.as_deref()).ok_or_else(|| {
+    let explicit = [
+        (CompilerSource::Flag, wrapper.cc.as_deref()),
+        (CompilerSource::EnvMcpccCc, env.mcpcc_cc.as_deref()),
+        (CompilerSource::EnvCc, env.cc.as_deref()),
+    ];
+
+    for (source, spec) in explicit {
+        let Some(spec) = spec else {
+            continue;
+        };
+        let path = resolve_spec(spec, env.path.as_deref()).ok_or_else(|| {
             CompilerResolveError::NotFound {
-                source: CompilerSource::Flag,
+                source,
                 spec: spec.to_string(),
             }
-        });
-    }
-
-    if let Some(spec) = env.mcpcc_cc.as_deref() {
-        return resolve_spec(spec, env.path.as_deref()).ok_or_else(|| {
-            CompilerResolveError::NotFound {
-                source: CompilerSource::EnvMcpccCc,
+        })?;
+        // `CC=mcpcc` (or a symlink to it) would make mcpcc exec itself forever.
+        if is_self_executable(&path) {
+            return Err(CompilerResolveError::SelfRecursion {
+                source,
                 spec: spec.to_string(),
-            }
-        });
-    }
-
-    if let Some(spec) = env.cc.as_deref() {
-        return resolve_spec(spec, env.path.as_deref()).ok_or_else(|| {
-            CompilerResolveError::NotFound {
-                source: CompilerSource::EnvCc,
-                spec: spec.to_string(),
-            }
-        });
-    }
-
-    if let Some(path) = resolve_spec("clang", env.path.as_deref()) {
+            });
+        }
         return Ok(path);
     }
 
-    if let Some(path) = resolve_spec("gcc", env.path.as_deref()) {
-        return Ok(path);
+    for fallback in ["clang", "gcc"] {
+        if let Some(path) = resolve_spec(fallback, env.path.as_deref()) {
+            if is_self_executable(&path) {
+                continue;
+            }
+            return Ok(path);
+        }
     }
 
     Err(CompilerResolveError::NoCompilerFound)
+}
+
+/// True when `path` points at the running mcpcc executable (directly, via
+/// symlink, or via hardlink).
+fn is_self_executable(path: &Path) -> bool {
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let current = std::fs::canonicalize(&current).unwrap_or(current);
+    if resolved == current {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (resolved.metadata(), current.metadata()) {
+            return a.dev() == b.dev() && a.ino() == b.ino();
+        }
+    }
+
+    false
 }
 
 fn resolve_spec(spec: &str, path_env: Option<&OsStr>) -> Option<PathBuf> {
@@ -4306,12 +4441,101 @@ mod tests {
     }
 
     #[test]
+    fn resolve_compiler_rejects_self_recursion() {
+        // current_exe() in unit tests is the test binary itself; pointing the
+        // compiler spec at it must trip the self-recursion guard.
+        let self_path = std::env::current_exe().expect("current exe");
+
+        let wrapper = WrapperFlags {
+            cc: Some(self_path.to_string_lossy().to_string()),
+            ..WrapperFlags::default()
+        };
+        let env = EnvSnapshot::default();
+
+        let err = resolve_underlying_compiler(&wrapper, &env).expect_err("must refuse self");
+        assert!(
+            matches!(err, CompilerResolveError::SelfRecursion { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_compiler_rejects_self_recursion_via_symlink() {
+        let td = TempDir::new("mcpcc-self-symlink");
+        let self_path = std::env::current_exe().expect("current exe");
+        let link = td.path.join("cc");
+        std::os::unix::fs::symlink(&self_path, &link).expect("symlink");
+
+        let wrapper = WrapperFlags {
+            cc: Some(link.to_string_lossy().to_string()),
+            ..WrapperFlags::default()
+        };
+        let env = EnvSnapshot::default();
+
+        let err = resolve_underlying_compiler(&wrapper, &env).expect_err("must refuse symlink");
+        assert!(
+            matches!(err, CompilerResolveError::SelfRecursion { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
     fn parse_args_accepts_help_and_version_flags() {
         let parsed = parse_args(&v(&["--mcpcc-help"])).expect("parse");
         assert!(parsed.wrapper.help);
 
         let parsed = parse_args(&v(&["--mcpcc-version"])).expect("parse");
         assert!(parsed.wrapper.version);
+    }
+
+    #[test]
+    fn plan_caps_llm_expected_params_per_tool() {
+        let td = TempDir::new("mcpcc-llm-cap");
+
+        // 130 long options (pjsua-scale) → expected params must cap at 128.
+        let mut table = String::new();
+        for i in 0..130 {
+            table.push_str(&format!("  {{\"opt{i:03}\", required_argument, 0, 0}},\n"));
+        }
+        let source = format!(
+            r#"
+#include <getopt.h>
+static struct option long_options[] = {{
+{table}  {{0, 0, 0, 0}},
+}};
+int main(int argc, char **argv) {{
+  while (getopt_long(argc, argv, "", long_options, 0) != -1) {{}}
+  return 0;
+}}
+"#
+        );
+        let src_path = td.path.join("big.c");
+        std::fs::write(&src_path, source).expect("write big.c");
+
+        let artifacts = ArtifactPaths {
+            bin_path: td.path.join("big"),
+            base_name: "big".to_string(),
+            mcp_json_path: td.path.join("big.mcp.json"),
+            server_path: td.path.join("big.mcp-server"),
+            manifest_path: td.path.join("big.mcpcc-manifest.json"),
+        };
+        let passthrough = vec![src_path.to_string_lossy().to_string()];
+
+        let plan = plan_mcp_json(&artifacts, &passthrough).expect("plan");
+        let expected = plan
+            .llm_expected
+            .get("big")
+            .expect("structured tool params");
+        assert_eq!(expected.len(), 128, "params must cap at 128");
+        assert!(
+            plan.analysis
+                .notes
+                .iter()
+                .any(|n| n.contains("llm params capped for big")),
+            "cap must be noted: {:?}",
+            plan.analysis.notes
+        );
     }
 
     #[test]

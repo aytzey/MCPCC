@@ -123,6 +123,11 @@ fn main() -> ExitCode {
     // Analysis works on the expanded argv so `@response-file` link lines
     // (e.g. CMake+Ninja) still reveal `-o` and the source/object files.
     let analysis_args = mcpcc::expand_response_files(&parsed.passthrough);
+
+    // On `-c` compile steps, remember which sources produced which objects so
+    // the later link step can run the extractors on them (autoconf/make trees).
+    mcpcc::record_compile_step_sources(&analysis_args);
+
     let artifacts = mcpcc::plan_artifacts(&parsed.wrapper, &analysis_args);
 
     if parsed.wrapper.verbose {

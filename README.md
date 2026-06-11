@@ -192,6 +192,48 @@ For multi-file CMake projects, mcpcc recovers original source paths from the
 `CMakeFiles/<target>.dir/….c.o` object names at link time and runs the
 extractors on them.
 
+## Using mcpcc with autoconf/make (pjsip example)
+
+Autoconf projects work the same way — wrap the compiler(s) with small scripts
+and pass them to `configure`. Two details matter:
+
+1. **Wrap `CXX` too if executables link through it.** Many projects (pjsip
+   included) link apps with `$(CXX)` even when the app code is C; with only
+   `CC` wrapped, binaries build fine but no MCP artifacts appear.
+2. **Always pin the real compiler inside the wrapper** (`--mcpcc-cc`). Setting
+   `CC=mcpcc` bare would make mcpcc resolve itself as the underlying compiler —
+   it now detects this and fails fast instead of recursing.
+
+```bash
+cat > /tmp/mcpcc-gcc.sh <<'SH'
+#!/bin/sh
+export MCPCC_ALLOW_NO_LLM=1
+exec /path/to/mcpcc --mcpcc-cc /usr/bin/gcc --mcpcc-llm-mode off -- "$@"
+SH
+sed 's/gcc/g++/g' /tmp/mcpcc-gcc.sh > /tmp/mcpcc-gxx.sh
+chmod +x /tmp/mcpcc-gcc.sh /tmp/mcpcc-gxx.sh
+
+cd pjproject
+./configure CC=/tmp/mcpcc-gcc.sh CXX=/tmp/mcpcc-gxx.sh
+make dep && make
+ls pjsip-apps/bin/    # pjsua-…  pjsua-….mcp.json  pjsua-….mcp-server  …
+```
+
+How extraction finds sources in autoconf trees: during each `-c` compile step
+mcpcc writes a `<obj>.o.mcpcc-src` sidecar recording the source path; at link
+time it reads the sidecars of the objects on the link line and runs the
+extractors on those sources. pjsua's option table (PJLIB's `pj_getopt_long` /
+`struct pj_getopt_option`, recognized alongside glibc `getopt_long` and
+`getopt_long_only`) then becomes a structured tool with all of its long
+options. For big trees, prefer `--mcpcc-llm-mode best-effort` or `off` unless
+you want one OpenRouter call per produced binary (results are cached).
+
+Note: interactive long-running programs (like pjsua) run in one-shot mode —
+each tool call spawns the binary, optionally feeds `stdin`, and returns when it
+exits or hits the timeout. Scripted sessions (`--duration`-style flags, console
+commands piped via `stdin`) work well; a persistent daemon session across calls
+is out of scope for V1.
+
 ## Repository layout
 
 ```

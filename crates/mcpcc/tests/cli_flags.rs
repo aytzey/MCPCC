@@ -172,6 +172,23 @@ fn env_vars_drive_llm_mode_and_artifacts_dir() {
 }
 
 #[test]
+fn cc_pointing_at_mcpcc_itself_fails_instead_of_forking_forever() {
+    let bin = env!("CARGO_BIN_EXE_mcpcc");
+    let out = Command::new(bin)
+        .env("CC", bin)
+        .arg("--mcpcc-print-cc")
+        .output()
+        .expect("run mcpcc");
+
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refusing to use mcpcc itself"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
 fn response_file_link_line_still_produces_artifacts() {
     let td = TempDir::new("mcpcc-response-file");
     let cc_path = link_fake_compiler(&td.path);
