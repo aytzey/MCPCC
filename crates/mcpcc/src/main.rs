@@ -21,10 +21,40 @@ fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
     ExitCode::from(1)
 }
 
+const USAGE: &str = "\
+mcpcc - C/C++ compiler wrapper that emits MCP tool artifacts for linked executables
+
+USAGE:
+    mcpcc [MCPCC_FLAGS...] -- [COMPILER_ARGS...]
+    mcpcc [MCPCC_FLAGS_AND_COMPILER_ARGS...]   (flags prefixed --mcpcc- are consumed)
+
+MCPCC FLAGS:
+    --mcpcc-cc <path>             Underlying compiler (else $MCPCC_CC, $CC, clang, gcc)
+    --mcpcc-print-cc              Print the resolved compiler path and exit
+    --mcpcc-artifacts-dir <dir>   Artifact output dir (default: binary's directory)
+    --mcpcc-mcp-json-out <path>   Override mcp.json output path
+    --mcpcc-server-out <path>     Override MCP server binary output path
+    --mcpcc-manifest-out <path>   Override manifest output path
+    --mcpcc-llm-mode <mode>       required|best-effort|off (default: required;
+                                  off needs MCPCC_ALLOW_NO_LLM=1)
+    --mcpcc-llm-model <id>        OpenRouter model id
+    --mcpcc-cache-dir <dir>       LLM cache dir (default: ~/.cache/mcpcc)
+    --mcpcc-verbose               Verbose diagnostics on stderr
+    --mcpcc-version               Print version and exit
+    --mcpcc-help                  Print this help and exit
+
+ENVIRONMENT:
+    OPENROUTER_API_KEY            Required in llm-mode=required
+    MCPCC_CC, MCPCC_LLM_MODE, MCPCC_LLM_MODEL, MCPCC_CACHE_DIR,
+    MCPCC_ARTIFACTS_DIR, MCPCC_ALLOW_NO_LLM, MCPCC_OPENROUTER_BASE_URL
+
+On a successful executable link, mcpcc writes <bin>.mcp.json, <bin>.mcp-server,
+and <bin>.mcpcc-manifest.json next to the binary.";
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
-    let parsed = match mcpcc::parse_args(&argv) {
+    let mut parsed = match mcpcc::parse_args(&argv) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("mcpcc: {err}");
@@ -32,8 +62,27 @@ fn main() -> ExitCode {
         }
     };
 
+    if parsed.wrapper.help {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+
+    if parsed.wrapper.version {
+        println!("mcpcc {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+
+    let llm_mode = match mcpcc::resolve_llm_mode(&parsed.wrapper) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("mcpcc: {msg}");
+            return ExitCode::from(2);
+        }
+    };
+    parsed.wrapper.llm_mode = Some(llm_mode);
+
     let llm_env = mcpcc::LlmEnv::from_current();
-    if parsed.wrapper.llm_mode == mcpcc::LlmMode::Off && !llm_env.allow_no_llm {
+    if llm_mode == mcpcc::LlmMode::Off && !llm_env.allow_no_llm {
         eprintln!("mcpcc: --mcpcc-llm-mode=off requires MCPCC_ALLOW_NO_LLM=1");
         return ExitCode::from(2);
     }
@@ -71,7 +120,10 @@ fn main() -> ExitCode {
         return exit_code_from_status(status);
     }
 
-    let artifacts = mcpcc::plan_artifacts(&parsed.wrapper, &parsed.passthrough);
+    // Analysis works on the expanded argv so `@response-file` link lines
+    // (e.g. CMake+Ninja) still reveal `-o` and the source/object files.
+    let analysis_args = mcpcc::expand_response_files(&parsed.passthrough);
+    let artifacts = mcpcc::plan_artifacts(&parsed.wrapper, &analysis_args);
 
     if parsed.wrapper.verbose {
         match &artifacts {
@@ -87,7 +139,7 @@ fn main() -> ExitCode {
     }
 
     if let Some(artifacts) = artifacts {
-        let mut plan = match mcpcc::plan_mcp_json(&artifacts, &parsed.passthrough) {
+        let mut plan = match mcpcc::plan_mcp_json(&artifacts, &analysis_args) {
             Ok(v) => v,
             Err(err) => {
                 eprintln!("mcpcc: failed to plan mcp.json: {err}");

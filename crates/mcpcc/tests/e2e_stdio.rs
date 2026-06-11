@@ -200,9 +200,7 @@ fn list_tools(
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("result.tools array")
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+        .to_vec();
 
     (child, stdin, reader, tools)
 }

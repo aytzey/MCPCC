@@ -3,11 +3,42 @@ use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// MCP protocol versions this server can negotiate. The server's behavior is a
+/// strict subset of all of them (tools capability only), so echoing any known
+/// client-requested version is safe.
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
+    ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
+
 #[derive(Debug, Clone)]
 struct McpJsonBundle {
     mcp_spec_version: String,
     binary_path: String,
+    default_cwd: Option<String>,
+    /// Directory containing the mcp.json; relative binary/cwd paths resolve against it
+    /// so the server works no matter which cwd the MCP client launches it from.
+    bundle_dir: PathBuf,
     tools: Vec<serde_json::Value>,
+}
+
+impl McpJsonBundle {
+    fn resolved_binary_path(&self) -> PathBuf {
+        let path = Path::new(&self.binary_path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.bundle_dir.join(path)
+        }
+    }
+
+    fn resolved_cwd(&self) -> Option<PathBuf> {
+        let cwd = self.default_cwd.as_deref()?;
+        let path = Path::new(cwd);
+        if path.is_absolute() {
+            Some(path.to_path_buf())
+        } else {
+            Some(self.bundle_dir.join(path))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,9 +137,8 @@ fn load_mcp_json_bundle(path: &Path) -> Result<McpJsonBundle, ServerError> {
             )
         })?;
 
-    let binary_path = obj
-        .get("binary")
-        .and_then(|v| v.as_object())
+    let binary = obj.get("binary").and_then(|v| v.as_object());
+    let binary_path = binary
         .and_then(|binary| binary.get("path"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
@@ -117,6 +147,11 @@ fn load_mcp_json_bundle(path: &Path) -> Result<McpJsonBundle, ServerError> {
                 "mcp.json missing required string field: binary.path".into(),
             )
         })?;
+    let default_cwd = binary
+        .and_then(|binary| binary.get("defaultCwd"))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_string);
 
     let tools = obj
         .get("tools")
@@ -124,9 +159,7 @@ fn load_mcp_json_bundle(path: &Path) -> Result<McpJsonBundle, ServerError> {
         .ok_or_else(|| {
             ServerError::InvalidMcpJson("mcp.json missing required array field: tools".into())
         })?
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+        .to_vec();
 
     if tools.is_empty() {
         return Err(ServerError::InvalidMcpJson(
@@ -134,9 +167,17 @@ fn load_mcp_json_bundle(path: &Path) -> Result<McpJsonBundle, ServerError> {
         ));
     }
 
+    let bundle_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
     Ok(McpJsonBundle {
         mcp_spec_version,
         binary_path,
+        default_cwd,
+        bundle_dir,
         tools,
     })
 }
@@ -209,7 +250,7 @@ fn handle_message(
 
             *lifecycle = Lifecycle::AwaitingInitialized;
             let result = serde_json::json!({
-                "protocolVersion": bundle.mcp_spec_version.as_str(),
+                "protocolVersion": negotiate_protocol_version(obj, bundle),
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": {
                     "name": env!("CARGO_PKG_NAME"),
@@ -218,7 +259,9 @@ fn handle_message(
             });
             Some(jsonrpc_result(id, result))
         }
-        "initialized" => {
+        // `notifications/initialized` is the MCP spec name; `initialized` is kept as a
+        // legacy alias for older mcpcc clients/scripts.
+        "notifications/initialized" | "initialized" => {
             if *lifecycle == Lifecycle::AwaitingInitialized {
                 *lifecycle = Lifecycle::Ready;
             }
@@ -231,7 +274,18 @@ fn handle_message(
                 None
             }
         }
-        "tools/listTools" => {
+        // Pings are valid in every lifecycle state and must get an empty result.
+        "ping" => {
+            if !is_request {
+                return None;
+            }
+            Some(jsonrpc_result(
+                id.unwrap_or(serde_json::Value::Null),
+                serde_json::json!({}),
+            ))
+        }
+        // `tools/list` is the MCP spec name; `tools/listTools` is a legacy alias.
+        "tools/list" | "tools/listTools" => {
             if !is_request {
                 return None;
             }
@@ -248,7 +302,8 @@ fn handle_message(
             });
             Some(jsonrpc_result(id, result))
         }
-        "tools/callTool" => {
+        // `tools/call` is the MCP spec name; `tools/callTool` is a legacy alias.
+        "tools/call" | "tools/callTool" => {
             if !is_request {
                 return None;
             }
@@ -279,6 +334,22 @@ fn handle_message(
     }
 }
 
+fn negotiate_protocol_version(
+    msg_obj: &serde_json::Map<String, serde_json::Value>,
+    bundle: &McpJsonBundle,
+) -> String {
+    let requested = msg_obj
+        .get("params")
+        .and_then(|v| v.as_object())
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(|v| v.as_str());
+
+    match requested {
+        Some(version) if SUPPORTED_PROTOCOL_VERSIONS.contains(&version) => version.to_string(),
+        _ => bundle.mcp_spec_version.clone(),
+    }
+}
+
 fn handle_call_tool(
     msg_obj: &serde_json::Map<String, serde_json::Value>,
     bundle: &McpJsonBundle,
@@ -294,8 +365,10 @@ fn handle_call_tool(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "invalid params (expected string): params.name".to_string())?;
 
+    // Per the MCP Tools spec, unknown tools are protocol errors (-32602), not
+    // isError tool results.
     let Some(tool) = find_tool(bundle, tool_name) else {
-        return Ok(tool_error_result(&format!("tool not found: {tool_name}")));
+        return Err(format!("Unknown tool: {tool_name}"));
     };
 
     if tool_name.ends_with(".run_raw") {
@@ -316,7 +389,17 @@ fn handle_call_tool(
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        return Ok(run_binary_tool(&bundle.binary_path, &argv, tool));
+        let stdin_data = match args_obj.get("stdin") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(text)) => Some(text.clone()),
+            Some(_) => {
+                return Ok(tool_error_result(
+                    "invalid arguments (expected string): arguments.stdin",
+                ));
+            }
+        };
+
+        return Ok(run_binary_tool(bundle, &argv, tool, stdin_data));
     }
 
     let empty_arguments = serde_json::Map::new();
@@ -326,7 +409,7 @@ fn handle_call_tool(
         .unwrap_or(&empty_arguments);
 
     match argv_from_structured_tool_call(tool, args_obj) {
-        Ok(argv) => Ok(run_binary_tool(&bundle.binary_path, &argv, tool)),
+        Ok(argv) => Ok(run_binary_tool(bundle, &argv, tool, None)),
         Err(msg) => Ok(tool_error_result(&msg)),
     }
 }
@@ -341,12 +424,13 @@ fn find_tool<'a>(bundle: &'a McpJsonBundle, name: &str) -> Option<&'a serde_json
 }
 
 fn run_binary_tool(
-    binary_path: &str,
+    bundle: &McpJsonBundle,
     argv: &[String],
     tool: &serde_json::Value,
+    stdin_data: Option<String>,
 ) -> serde_json::Value {
     let limits = tool_exec_limits(tool);
-    let outcome = run_raw_binary(binary_path, argv, limits);
+    let outcome = run_raw_binary(bundle, argv, limits, stdin_data);
 
     let summary = if let Some(err) = &outcome.spawn_error {
         format!("spawn error: {err}")
@@ -481,16 +565,49 @@ fn argv_from_structured_tool_call(
             "optional"
         };
 
+        // GNU getopt_long/argp only accept optional-argument values in the attached
+        // form (`--flag=value`); a separate value would be parsed as a positional.
+        let default_style = if arg_requirement == "optional" {
+            "attached"
+        } else {
+            "separate"
+        };
+        let value_style = opt_obj
+            .get("valueStyle")
+            .and_then(|v| v.as_str())
+            .unwrap_or(default_style);
+
         if repeatable {
             if let Some(values) = value.as_array() {
                 for entry in values {
-                    apply_option_value(&mut argv, property, flag, arg_requirement, entry)?;
+                    apply_option_value(
+                        &mut argv,
+                        property,
+                        flag,
+                        arg_requirement,
+                        value_style,
+                        entry,
+                    )?;
                 }
             } else {
-                apply_option_value(&mut argv, property, flag, arg_requirement, value)?;
+                apply_option_value(
+                    &mut argv,
+                    property,
+                    flag,
+                    arg_requirement,
+                    value_style,
+                    value,
+                )?;
             }
         } else {
-            apply_option_value(&mut argv, property, flag, arg_requirement, value)?;
+            apply_option_value(
+                &mut argv,
+                property,
+                flag,
+                arg_requirement,
+                value_style,
+                value,
+            )?;
         }
     }
 
@@ -513,11 +630,38 @@ fn argv_from_structured_tool_call(
     Ok(argv)
 }
 
+/// Stringify a scalar JSON value for use as a CLI option value. Schemas may
+/// declare `integer`/`number`/`boolean` option types, so accept those alongside
+/// strings instead of failing on perfectly schema-valid input.
+fn scalar_option_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn push_flag_with_value(argv: &mut Vec<String>, flag: &str, value: &str, value_style: &str) {
+    if value_style == "attached" {
+        if flag.starts_with("--") {
+            argv.push(format!("{flag}={value}"));
+        } else {
+            // Short options attach without '=': `-c` + `red` → `-cred`.
+            argv.push(format!("{flag}{value}"));
+        }
+    } else {
+        argv.push(flag.to_string());
+        argv.push(value.to_string());
+    }
+}
+
 fn apply_option_value(
     argv: &mut Vec<String>,
     param: &str,
     flag: &str,
     arg_requirement: &str,
+    value_style: &str,
     value: &serde_json::Value,
 ) -> Result<(), String> {
     match arg_requirement {
@@ -533,24 +677,24 @@ fn apply_option_value(
             Ok(())
         }
         "required" => {
-            let Some(arg) = value.as_str() else {
+            let Some(arg) = scalar_option_value(value) else {
                 return Err(format!(
-                    "invalid arguments (expected string): arguments.{param}"
+                    "invalid arguments (expected string, number, or boolean): arguments.{param}"
                 ));
             };
-            argv.push(flag.to_string());
-            argv.push(arg.to_string());
+            push_flag_with_value(argv, flag, &arg, value_style);
             Ok(())
         }
         "optional" => {
-            let Some(arg) = value.as_str() else {
+            let Some(arg) = scalar_option_value(value) else {
                 return Err(format!(
-                    "invalid arguments (expected string): arguments.{param}"
+                    "invalid arguments (expected string, number, or boolean): arguments.{param}"
                 ));
             };
-            argv.push(flag.to_string());
-            if !arg.is_empty() {
-                argv.push(arg.to_string());
+            if arg.is_empty() {
+                argv.push(flag.to_string());
+            } else {
+                push_flag_with_value(argv, flag, &arg, value_style);
             }
             Ok(())
         }
@@ -614,13 +758,26 @@ struct ToolRunOutcome {
     spawn_error: Option<String>,
 }
 
-fn run_raw_binary(binary_path: &str, argv: &[String], limits: ExecLimits) -> ToolRunOutcome {
+fn run_raw_binary(
+    bundle: &McpJsonBundle,
+    argv: &[String],
+    limits: ExecLimits,
+    stdin_data: Option<String>,
+) -> ToolRunOutcome {
     let started = Instant::now();
-    let mut cmd = std::process::Command::new(binary_path);
+    let binary_path = bundle.resolved_binary_path();
+    let mut cmd = std::process::Command::new(&binary_path);
     cmd.args(argv)
-        .stdin(std::process::Stdio::null())
+        .stdin(if stdin_data.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if let Some(cwd) = bundle.resolved_cwd() {
+        cmd.current_dir(cwd);
+    }
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -634,10 +791,20 @@ fn run_raw_binary(binary_path: &str, argv: &[String], limits: ExecLimits) -> Too
                 truncated_stdout: false,
                 truncated_stderr: false,
                 is_error: true,
-                spawn_error: Some(err.to_string()),
+                spawn_error: Some(format!("{}: {err}", binary_path.display())),
             };
         }
     };
+
+    // Write stdin from a separate thread so a child that blocks on output can
+    // never deadlock against us blocking on its input.
+    let stdin_thread = stdin_data.and_then(|data| {
+        child.stdin.take().map(|mut stdin| {
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(data.as_bytes());
+            })
+        })
+    });
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -666,6 +833,9 @@ fn run_raw_binary(binary_path: &str, argv: &[String], limits: ExecLimits) -> Too
         }
     };
 
+    if let Some(stdin_thread) = stdin_thread {
+        let _ = stdin_thread.join();
+    }
     let (stdout, truncated_stdout) = stdout_thread.join().unwrap_or_else(|_| (Vec::new(), false));
     let (stderr, truncated_stderr) = stderr_thread.join().unwrap_or_else(|_| (Vec::new(), false));
 

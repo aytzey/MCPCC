@@ -237,6 +237,7 @@ int main(int argc, char **argv) {
         opts[0].get("takesValue").and_then(|v| v.as_bool()),
         Some(false)
     );
+    assert_eq!(opts[0].get("arg").and_then(|v| v.as_str()), Some("none"));
     assert_eq!(
         opts[0].get("valueStyle").and_then(|v| v.as_str()),
         Some("separate")
@@ -255,6 +256,10 @@ int main(int argc, char **argv) {
     assert_eq!(
         opts[1].get("takesValue").and_then(|v| v.as_bool()),
         Some(true)
+    );
+    assert_eq!(
+        opts[1].get("arg").and_then(|v| v.as_str()),
+        Some("required")
     );
     assert_eq!(
         opts[1].get("valueStyle").and_then(|v| v.as_str()),
@@ -276,8 +281,14 @@ int main(int argc, char **argv) {
         Some(true)
     );
     assert_eq!(
+        opts[2].get("arg").and_then(|v| v.as_str()),
+        Some("optional")
+    );
+    // Optional-argument values must serialize attached (`--color=WHEN`);
+    // GNU getopt_long treats a separate token as a positional instead.
+    assert_eq!(
         opts[2].get("valueStyle").and_then(|v| v.as_str()),
-        Some("separate")
+        Some("attached")
     );
     assert_eq!(
         opts[2].get("repeatable").and_then(|v| v.as_bool()),

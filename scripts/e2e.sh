@@ -13,7 +13,10 @@ rm -rf "$ARTIFACTS_DIR"
 mkdir -p "$BIN_DIR" "$CACHE_DIR"
 
 echo "[e2e] building workspace..."
-source "$HOME/.cargo/env"
+if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
 cargo build --workspace
 
 MCPCC_BIN="$ROOT_DIR/target/debug/mcpcc"
@@ -98,9 +101,11 @@ bin_dir = os.environ["BIN_DIR_PY"]
 server = os.path.join(bin_dir, f"{name}.mcp-server")
 raw_tool = f"{name}.run_raw"
 
-init = {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-initialized = {"jsonrpc":"2.0","method":"initialized","params":{}}
-call = {"jsonrpc":"2.0","id":2,"method":"tools/callTool","params":{"name":raw_tool,"arguments":{"argv":["--help"]}}}
+init = {"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"protocolVersion":"2025-11-25","capabilities":{},
+                  "clientInfo":{"name":"mcpcc-e2e","version":"0"}}}
+initialized = {"jsonrpc":"2.0","method":"notifications/initialized"}
+call = {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":raw_tool,"arguments":{"argv":["--help"]}}}
 
 inp = (json.dumps(init)+"\n"+json.dumps(initialized)+"\n"+json.dumps(call)+"\n").encode()
 

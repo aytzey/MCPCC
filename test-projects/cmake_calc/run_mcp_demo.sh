@@ -13,7 +13,7 @@ BUILD_DIR="$ROOT_DIR/build"
 
 if [ ! -d "$BUILD_DIR" ]; then
   echo "build dir not found: $BUILD_DIR" >&2
-  echo "Run: mkdir -p build && cd build && cmake -DCMAKE_C_COMPILER=../mcpcc-gcc.sh .. && cmake --build ." >&2
+  echo "Run: mkdir -p build && cd build && cmake -DCMAKE_C_COMPILER=\"\$(pwd)/../mcpcc-gcc.sh\" .. && cmake --build ." >&2
   exit 2
 fi
 
@@ -28,9 +28,11 @@ python3 - <<PY
 import json, subprocess, sys
 expr = ${EXPR@Q}
 
-init={"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-initialized={"jsonrpc":"2.0","method":"initialized","params":{}}
-call={"jsonrpc":"2.0","id":2,"method":"tools/callTool",
+init={"jsonrpc":"2.0","id":1,"method":"initialize",
+      "params":{"protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"mcpcc-demo","version":"0"}}}
+initialized={"jsonrpc":"2.0","method":"notifications/initialized"}
+call={"jsonrpc":"2.0","id":2,"method":"tools/call",
       "params":{"name":"calc","arguments":{"expr":expr}}}
 
 inp=(json.dumps(init)+"\n"+json.dumps(initialized)+"\n"+json.dumps(call)+"\n").encode()

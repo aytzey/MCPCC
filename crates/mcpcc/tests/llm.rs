@@ -178,7 +178,8 @@ fn required_mode_calls_openrouter_and_writes_cache_then_uses_cache_without_key()
             "hello.run_raw": {
                 "toolDescription": "Run the program with raw argv.",
                 "params": {
-                    "argv": "Program arguments (argv array)."
+                    "argv": "Program arguments (argv array).",
+                    "stdin": "Text piped to the program's standard input."
                 }
             }
         }
@@ -255,6 +256,14 @@ fn required_mode_calls_openrouter_and_writes_cache_then_uses_cache_without_key()
                 "optionalArg": true,
                 "guessedType": "array<string>",
                 "doc": "Arguments to pass to the binary as an argv array."
+            }, {
+                "property": "stdin",
+                "long": null,
+                "short": null,
+                "takesValue": true,
+                "optionalArg": true,
+                "guessedType": "string",
+                "doc": "Optional text piped to the program's standard input."
             }]
         }]
     })

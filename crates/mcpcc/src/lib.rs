@@ -12,17 +12,12 @@ pub const LLM_PROMPT_VERSION: &str = "v2";
 pub const DEFAULT_LLM_MODEL: &str = "openai/gpt-4o-mini";
 const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LlmMode {
+    #[default]
     Required,
     BestEffort,
     Off,
-}
-
-impl Default for LlmMode {
-    fn default() -> Self {
-        Self::Required
-    }
 }
 
 impl LlmMode {
@@ -48,14 +43,31 @@ impl LlmMode {
 pub struct WrapperFlags {
     pub cc: Option<String>,
     pub print_cc: bool,
+    pub help: bool,
+    pub version: bool,
     pub verbose: bool,
     pub artifacts_dir: Option<PathBuf>,
     pub mcp_json_out: Option<PathBuf>,
     pub server_out: Option<PathBuf>,
     pub manifest_out: Option<PathBuf>,
-    pub llm_mode: LlmMode,
+    /// `None` means "not set on the CLI" — `MCPCC_LLM_MODE` and the default
+    /// (`required`) are applied via [`resolve_llm_mode`].
+    pub llm_mode: Option<LlmMode>,
     pub llm_model: Option<String>,
     pub cache_dir: Option<PathBuf>,
+}
+
+/// Resolve the effective LLM mode: `--mcpcc-llm-mode` > `MCPCC_LLM_MODE` > `required`.
+pub fn resolve_llm_mode(wrapper: &WrapperFlags) -> Result<LlmMode, String> {
+    if let Some(mode) = wrapper.llm_mode {
+        return Ok(mode);
+    }
+    match std::env::var("MCPCC_LLM_MODE") {
+        Ok(raw) if !raw.trim().is_empty() => LlmMode::parse(&raw).ok_or_else(|| {
+            format!("invalid MCPCC_LLM_MODE (expected required|best-effort|off): {raw}")
+        }),
+        _ => Ok(LlmMode::default()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +160,18 @@ fn consume_wrapper_flag(
 
     if arg == "--mcpcc-print-cc" {
         wrapper.print_cc = true;
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-help" {
+        wrapper.help = true;
+        *idx += 1;
+        return Ok(true);
+    }
+
+    if arg == "--mcpcc-version" {
+        wrapper.version = true;
         *idx += 1;
         return Ok(true);
     }
@@ -245,7 +269,7 @@ fn consume_wrapper_flag(
                 value: value.to_string(),
             });
         };
-        wrapper.llm_mode = mode;
+        wrapper.llm_mode = Some(mode);
         *idx += 1;
         return Ok(true);
     }
@@ -261,7 +285,7 @@ fn consume_wrapper_flag(
                 value: value.clone(),
             });
         };
-        wrapper.llm_mode = mode;
+        wrapper.llm_mode = Some(mode);
         *idx += 1;
         return Ok(true);
     }
@@ -401,7 +425,24 @@ enum OptionArgRequirement {
     Optional,
 }
 
-impl OptionArgRequirement {}
+impl OptionArgRequirement {
+    fn mapping_arg_str(self) -> &'static str {
+        match self {
+            OptionArgRequirement::None => "none",
+            OptionArgRequirement::Required => "required",
+            OptionArgRequirement::Optional => "optional",
+        }
+    }
+
+    /// GNU getopt_long/argp accept optional-argument values only in the
+    /// attached form (`--flag=value`); a separate token becomes a positional.
+    fn mapping_value_style(self) -> &'static str {
+        match self {
+            OptionArgRequirement::Optional => "attached",
+            _ => "separate",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GetoptLongOptionSpec {
@@ -687,6 +728,11 @@ fn build_run_raw_tool_json(
         .get("argv")
         .map(String::as_str)
         .unwrap_or("Arguments to pass to the binary as an argv array.");
+    let stdin_description = descriptions
+        .params
+        .get("stdin")
+        .map(String::as_str)
+        .unwrap_or("Optional text piped to the program's standard input.");
 
     let mut tool = serde_json::json!({
         "name": tool_name,
@@ -698,6 +744,10 @@ fn build_run_raw_tool_json(
                     "type": "array",
                     "description": argv_description,
                     "items": { "type": "string" },
+                },
+                "stdin": {
+                    "type": "string",
+                    "description": stdin_description,
                 },
             },
             "required": ["argv"],
@@ -743,12 +793,16 @@ fn build_getopt_long_structured_tool_json(
             serde_json::Value::String(format!("--{}", opt.long_name)),
         );
         entry.insert(
+            "arg".to_string(),
+            serde_json::Value::String(opt.long_arg.mapping_arg_str().to_string()),
+        );
+        entry.insert(
             "takesValue".to_string(),
             serde_json::Value::Bool(!matches!(opt.long_arg, OptionArgRequirement::None)),
         );
         entry.insert(
             "valueStyle".to_string(),
-            serde_json::Value::String("separate".to_string()),
+            serde_json::Value::String(opt.long_arg.mapping_value_style().to_string()),
         );
         entry.insert("repeatable".to_string(), serde_json::Value::Bool(false));
         entry.insert(
@@ -801,7 +855,7 @@ fn build_argp_structured_tool_json(
             let mut obj = schema
                 .as_object()
                 .cloned()
-                .unwrap_or_else(|| serde_json::Map::new());
+                .unwrap_or_else(serde_json::Map::new);
             obj.insert(
                 "description".to_string(),
                 serde_json::Value::String(doc.to_string()),
@@ -832,12 +886,16 @@ fn build_argp_structured_tool_json(
             serde_json::Value::String(format!("--{}", opt.long_name)),
         );
         entry.insert(
+            "arg".to_string(),
+            serde_json::Value::String(opt.arg_requirement.mapping_arg_str().to_string()),
+        );
+        entry.insert(
             "takesValue".to_string(),
             serde_json::Value::Bool(!matches!(opt.arg_requirement, OptionArgRequirement::None)),
         );
         entry.insert(
             "valueStyle".to_string(),
-            serde_json::Value::String("separate".to_string()),
+            serde_json::Value::String(opt.arg_requirement.mapping_value_style().to_string()),
         );
         entry.insert("repeatable".to_string(), serde_json::Value::Bool(false));
         entry.insert(
@@ -1328,6 +1386,10 @@ fn apply_param_annotation(tool: &mut serde_json::Value, annotation: &ParamAnnota
             .takes_value
             .unwrap_or_else(|| schema_type != "boolean");
         new.insert(
+            "arg".to_string(),
+            serde_json::Value::String(if takes_value { "required" } else { "none" }.to_string()),
+        );
+        new.insert(
             "takesValue".to_string(),
             serde_json::Value::Bool(takes_value),
         );
@@ -1371,6 +1433,21 @@ fn apply_param_annotation(tool: &mut serde_json::Value, annotation: &ParamAnnota
         opt_map.insert(
             "takesValue".to_string(),
             serde_json::Value::Bool(takes_value),
+        );
+        // Keep the explicit `arg` requirement coherent with the override. An
+        // existing optional-argument option stays optional when it still takes
+        // a value.
+        let new_arg = if takes_value {
+            match opt_map.get("arg").and_then(|v| v.as_str()) {
+                Some("optional") => "optional",
+                _ => "required",
+            }
+        } else {
+            "none"
+        };
+        opt_map.insert(
+            "arg".to_string(),
+            serde_json::Value::String(new_arg.to_string()),
         );
         changed = true;
     }
@@ -1454,9 +1531,14 @@ fn build_annotation_structured_tool_json(
         if let Some(short) = annotation.short.clone() {
             entry.insert("short".to_string(), serde_json::Value::String(short));
         }
+        let takes_value = annotation.takes_value.unwrap_or(schema_type != "boolean");
+        entry.insert(
+            "arg".to_string(),
+            serde_json::Value::String(if takes_value { "required" } else { "none" }.to_string()),
+        );
         entry.insert(
             "takesValue".to_string(),
-            serde_json::Value::Bool(annotation.takes_value.unwrap_or(schema_type != "boolean")),
+            serde_json::Value::Bool(takes_value),
         );
         entry.insert(
             "valueStyle".to_string(),
@@ -1610,25 +1692,23 @@ fn guessed_type_from_schema(schema: &serde_json::Value) -> String {
 
 fn truncate_llm_doc(value: &str) -> String {
     const MAX: usize = 160;
-    let trimmed = value.trim();
-    let mut out = String::new();
-    let mut count = 0usize;
-    for ch in trimmed.chars() {
-        if count >= MAX {
-            break;
-        }
-        out.push(ch);
-        count += 1;
-    }
-    out
+    value.trim().chars().take(MAX).collect()
 }
 
-fn llm_bundle_analysis_summary_json(artifacts: &ArtifactPaths, plan: &McpJsonPlan) -> String {
+// PRD §10.4: the LLM summary packet is bounded so prompts stay small.
+const LLM_SUMMARY_MAX_PARAMS_PER_TOOL: usize = 128;
+const LLM_SUMMARY_MAX_BYTES: usize = 8 * 1024;
+
+fn llm_bundle_analysis_summary_json(
+    artifacts: &ArtifactPaths,
+    mcp_json: &serde_json::Value,
+    llm_expected: &BTreeMap<String, Vec<String>>,
+    notes: &mut Vec<String>,
+) -> String {
     let binary_name = tool_base_name_for_artifacts(artifacts);
 
     let mut tools_summary = Vec::new();
-    let tools = plan
-        .mcp_json
+    let tools = mcp_json
         .get("tools")
         .and_then(|v| v.as_array())
         .cloned()
@@ -1638,8 +1718,17 @@ fn llm_bundle_analysis_summary_json(artifacts: &ArtifactPaths, plan: &McpJsonPla
         let Some(tool_name) = tool.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        let Some(expected_params) = plan.llm_expected.get(tool_name) else {
+        let Some(expected_params) = llm_expected.get(tool_name) else {
             continue;
+        };
+        let expected_params = if expected_params.len() > LLM_SUMMARY_MAX_PARAMS_PER_TOOL {
+            notes.push(format!(
+                "llm summary truncated for {tool_name}: {} params capped to {LLM_SUMMARY_MAX_PARAMS_PER_TOOL}",
+                expected_params.len()
+            ));
+            &expected_params[..LLM_SUMMARY_MAX_PARAMS_PER_TOOL]
+        } else {
+            expected_params.as_slice()
         };
 
         let mut mapping_by_property: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -1719,11 +1808,33 @@ fn llm_bundle_analysis_summary_json(artifacts: &ArtifactPaths, plan: &McpJsonPla
         }));
     }
 
-    serde_json::json!({
+    let summary = serde_json::json!({
         "binaryName": binary_name,
         "tools": tools_summary,
-    })
-    .to_string()
+    });
+    let rendered = summary.to_string();
+    if rendered.len() <= LLM_SUMMARY_MAX_BYTES {
+        return rendered;
+    }
+
+    // Over budget: drop the doc strings (the only free-form text) and note it.
+    notes.push(format!(
+        "llm summary exceeded {LLM_SUMMARY_MAX_BYTES} bytes; doc strings dropped"
+    ));
+    let mut summary = summary;
+    if let Some(tools) = summary.get_mut("tools").and_then(|v| v.as_array_mut()) {
+        for tool in tools {
+            let Some(params) = tool.get_mut("params").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            for param in params {
+                if let Some(obj) = param.as_object_mut() {
+                    obj.insert("doc".to_string(), serde_json::Value::String(String::new()));
+                }
+            }
+        }
+    }
+    summary.to_string()
 }
 
 fn tool_annotation_overrides_description(annotations: &McpccAnnotations, tool: &str) -> bool {
@@ -1808,16 +1919,15 @@ impl McpJsonPlan {
                     *entry = serde_json::Value::Object(serde_json::Map::new());
                 }
                 let schema_obj = entry.as_object_mut().expect("schema object");
-                if !overwrite_param_descriptions {
-                    if schema_obj
+                if !overwrite_param_descriptions
+                    && schema_obj
                         .get("description")
                         .and_then(|v| v.as_str())
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                         .is_some()
-                    {
-                        continue;
-                    }
+                {
+                    continue;
                 }
                 schema_obj.insert(
                     "description".to_string(),
@@ -1844,8 +1954,10 @@ pub fn plan_mcp_json(
     notes.extend(annotations.notes.iter().cloned());
     let tool_base_name = tool_base_name_for_artifacts(artifacts);
 
-    let mut analysis = AnalysisSummary::default();
-    analysis.notes = notes;
+    let mut analysis = AnalysisSummary {
+        notes,
+        ..AnalysisSummary::default()
+    };
 
     let mut structured_tool = if let Some(spec) = argp_spec.as_ref() {
         analysis.extractors = vec!["argp".to_string()];
@@ -1893,16 +2005,18 @@ pub fn plan_mcp_json(
 
     let llm_expected = llm_expected_from_mcp_json(&mcp_json);
 
-    let mut plan = McpJsonPlan {
+    let mut summary_notes = Vec::new();
+    let llm_summary_json =
+        llm_bundle_analysis_summary_json(artifacts, &mcp_json, &llm_expected, &mut summary_notes);
+    analysis.notes.extend(summary_notes);
+
+    Ok(McpJsonPlan {
         mcp_json,
         analysis,
         llm_expected,
-        llm_summary_json: String::new(),
+        llm_summary_json,
         annotations,
-    };
-    plan.llm_summary_json = llm_bundle_analysis_summary_json(artifacts, &plan);
-
-    Ok(plan)
+    })
 }
 
 pub fn build_manifest_json(
@@ -1921,6 +2035,11 @@ pub fn build_manifest_json(
     serde_json::json!({
         "mcpccVersion": env!("CARGO_PKG_VERSION"),
         "mcpSpecVersion": MCP_SPEC_VERSION,
+        "timestamp": rfc3339_utc_now(),
+        "host": {
+            "os": std::env::consts::OS,
+            "distro": host_distro_id(),
+        },
         "binary": {
             "path": artifacts.bin_path.to_string_lossy(),
         },
@@ -1953,6 +2072,44 @@ pub fn build_manifest_json(
     })
 }
 
+/// Format the current UTC time as RFC 3339 (e.g. `2026-01-26T00:00:00Z`)
+/// without pulling in a date/time dependency. Uses the standard
+/// days-from-civil inverse algorithm.
+fn rfc3339_utc_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+fn host_distro_id() -> Option<String> {
+    let contents = std::fs::read_to_string("/etc/os-release").ok()?;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("ID=") {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn write_manifest_json_atomic(
     compiler: &Path,
     compiler_args: &[String],
@@ -1980,7 +2137,7 @@ pub fn generate_llm_descriptions(
     expected: &BTreeMap<String, Vec<String>>,
 ) -> Result<(LlmBundleDescriptions, LlmManifestInfo), LlmError> {
     let provider = "openrouter".to_string();
-    let mode = wrapper.llm_mode;
+    let mode = wrapper.llm_mode.unwrap_or_default();
     let model = resolve_llm_model(wrapper);
     let prompt_version = LLM_PROMPT_VERSION.to_string();
     let placeholder = placeholder_bundle_descriptions(expected);
@@ -2090,7 +2247,7 @@ pub fn generate_llm_descriptions(
                     cache_hit: false,
                     prompt_version,
                     used_placeholder: true,
-                    error: Some("OpenRouter request failed".to_string()),
+                    error: Some(format!("OpenRouter request failed: {err}")),
                 },
             ))
         }
@@ -2137,22 +2294,32 @@ fn write_json_atomic(out_path: &Path, json: &serde_json::Value) -> Result<(), Js
     Ok(())
 }
 
+fn non_empty_env_var(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| (!v.trim().is_empty()).then_some(v))
+}
+
+/// `--mcpcc-llm-model` > `MCPCC_LLM_MODEL` > built-in default.
 fn resolve_llm_model(wrapper: &WrapperFlags) -> String {
     wrapper
         .llm_model
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .unwrap_or(DEFAULT_LLM_MODEL)
-        .to_string()
+        .map(str::to_string)
+        .or_else(|| non_empty_env_var("MCPCC_LLM_MODEL"))
+        .unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string())
 }
 
+/// `--mcpcc-cache-dir` > `MCPCC_CACHE_DIR` > XDG/HOME default.
 fn resolve_cache_dir(wrapper: &WrapperFlags) -> PathBuf {
     wrapper
         .cache_dir
         .as_ref()
         .filter(|p| !p.as_os_str().is_empty())
         .cloned()
+        .or_else(|| non_empty_env_var("MCPCC_CACHE_DIR").map(PathBuf::from))
         .unwrap_or_else(default_cache_dir)
 }
 
@@ -2198,6 +2365,7 @@ fn placeholder_bundle_descriptions(
         for param in params {
             let desc = match param.as_str() {
                 "argv" => "Arguments to pass to the binary as an argv array.",
+                "stdin" => "Optional text piped to the program's standard input.",
                 "args" => "Positional arguments to pass after options.",
                 other => {
                     if tool_name.ends_with(TOOL_RUN_RAW_SUFFIX) {
@@ -2245,6 +2413,10 @@ fn placeholder_run_raw_descriptions() -> LlmToolDescriptions {
     params.insert(
         "argv".to_string(),
         "Arguments to pass to the binary as an argv array.".to_string(),
+    );
+    params.insert(
+        "stdin".to_string(),
+        "Optional text piped to the program's standard input.".to_string(),
     );
     LlmToolDescriptions {
         tool_description: "Run the target binary with raw argv and return stdout/stderr/exit code."
@@ -3514,13 +3686,14 @@ fn collect_source_candidates(passthrough: &[String]) -> Vec<PathBuf> {
         // CMake often produces: CMakeFiles/<tgt>.dir/<relpath>.c.o
         // where <relpath>.c is relative to the *source* dir, not the build dir.
         if let Some(s) = p.to_str() {
-            if s.ends_with(".o") {
-                let stem = &s[..s.len() - 2];
-
+            if let Some(stem) = s.strip_suffix(".o") {
                 // 1) Direct sibling (works for some build systems).
                 let direct = PathBuf::from(stem);
                 if direct.exists() {
-                    let ext = direct.extension().and_then(|e| e.to_str()).unwrap_or_default();
+                    let ext = direct
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or_default();
                     if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C") {
                         out.push(direct);
                         continue;
@@ -3530,12 +3703,15 @@ fn collect_source_candidates(passthrough: &[String]) -> Vec<PathBuf> {
                 // 2) CMake heuristic: take the portion after `.dir/` and search upwards.
                 if let Some(pos) = stem.find(".dir/") {
                     let rel = &stem[(pos + 5)..]; // after `.dir/`
-                    // rel likely ends with `.c` / `.cpp` etc.
+                                                  // rel likely ends with `.c` / `.cpp` etc.
                     let mut base = PathBuf::from("..");
                     for _ in 0..4 {
                         let cand = base.join(rel);
                         if cand.exists() {
-                            let ext = cand.extension().and_then(|e| e.to_str()).unwrap_or_default();
+                            let ext = cand
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or_default();
                             if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "C") {
                                 out.push(cand);
                                 break;
@@ -3588,7 +3764,13 @@ pub fn plan_artifacts(wrapper: &WrapperFlags, passthrough: &[String]) -> Option<
         .unwrap_or_else(|| "a.out".to_string());
 
     let default_dir = bin_path.parent().unwrap_or_else(|| Path::new("."));
-    let dir = wrapper.artifacts_dir.as_deref().unwrap_or(default_dir);
+    // `--mcpcc-artifacts-dir` > `MCPCC_ARTIFACTS_DIR` > binary's directory.
+    let env_dir = non_empty_env_var("MCPCC_ARTIFACTS_DIR").map(PathBuf::from);
+    let dir = wrapper
+        .artifacts_dir
+        .as_deref()
+        .or(env_dir.as_deref())
+        .unwrap_or(default_dir);
 
     let mut mcp_json_path = dir.join(format!("{base_name}.mcp.json"));
     let mut server_path = dir.join(format!("{base_name}.mcp-server"));
@@ -3620,7 +3802,7 @@ const PACKAGED_SERVER_BINARY_NAMES: [&str; 1] = ["mcpcc-mcp-server"];
 
 fn resolve_packaged_mcp_server_binary() -> Result<PathBuf, ServerCopyError> {
     let mut searched = Vec::new();
-    let current_exe = std::env::current_exe().map_err(|err| ServerCopyError::CurrentExe(err))?;
+    let current_exe = std::env::current_exe().map_err(ServerCopyError::CurrentExe)?;
     if let Some(dir) = current_exe.parent() {
         for name in PACKAGED_SERVER_BINARY_NAMES {
             let candidate = dir.join(name);
@@ -3656,9 +3838,94 @@ pub fn copy_packaged_mcp_server_binary(out_path: &Path) -> Result<(), ServerCopy
 }
 
 fn should_skip_mcp_artifact_generation(passthrough: &[String]) -> bool {
-    passthrough
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "-c" | "-E" | "-S" | "-shared" | "--shared"))
+    passthrough.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            // No executable is produced in these modes (compile/preprocess/assemble,
+            // shared/relocatable link, syntax-only, dependency dumps).
+            "-c" | "-E" | "-S" | "-shared" | "--shared" | "-r" | "-fsyntax-only" | "-M" | "-MM"
+        )
+    })
+}
+
+/// Expand gcc/clang `@file` response files for analysis purposes (the compiler
+/// itself still receives the original argv). Tokens follow the compiler rules:
+/// whitespace-separated, with single/double quotes and backslash escapes.
+pub fn expand_response_files(args: &[String]) -> Vec<String> {
+    fn expand_into(args: &[String], out: &mut Vec<String>, depth: usize) {
+        for arg in args {
+            let Some(path) = arg.strip_prefix('@') else {
+                out.push(arg.clone());
+                continue;
+            };
+            if depth == 0 || path.is_empty() {
+                out.push(arg.clone());
+                continue;
+            }
+            match std::fs::read_to_string(path) {
+                Ok(contents) => {
+                    let tokens = tokenize_response_file(&contents);
+                    expand_into(&tokens, out, depth - 1);
+                }
+                Err(_) => out.push(arg.clone()),
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(args.len());
+    expand_into(args, &mut out, 4);
+    out
+}
+
+fn tokenize_response_file(contents: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut quote: Option<char> = None;
+    let mut chars = contents.chars();
+
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else if ch == '\\' && q == '"' {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            c if c.is_whitespace() => {
+                if in_token {
+                    tokens.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+            }
+            '\'' | '"' => {
+                quote = Some(ch);
+                in_token = true;
+            }
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+                in_token = true;
+            }
+            _ => {
+                current.push(ch);
+                in_token = true;
+            }
+        }
+    }
+
+    if in_token {
+        tokens.push(current);
+    }
+    tokens
 }
 
 fn resolve_bin_path(passthrough: &[String]) -> PathBuf {
@@ -3825,9 +4092,7 @@ fn find_executable(program: &str, path_env: Option<&OsStr>) -> Option<PathBuf> {
         return is_executable(p).then(|| p.to_path_buf());
     }
 
-    let Some(path_env) = path_env else {
-        return None;
-    };
+    let path_env = path_env?;
 
     for dir in std::env::split_paths(path_env) {
         let candidate = dir.join(program);
@@ -4024,11 +4289,60 @@ mod tests {
 
     #[test]
     fn artifact_plan_skips_compile_only_flags() {
-        for flag in ["-c", "-E", "-S", "-shared"] {
+        for flag in [
+            "-c",
+            "-E",
+            "-S",
+            "-shared",
+            "-r",
+            "-fsyntax-only",
+            "-M",
+            "-MM",
+        ] {
             let wrapper = WrapperFlags::default();
             let passthrough = v(&["hello.c", flag, "-o", "hello"]);
             assert_eq!(plan_artifacts(&wrapper, &passthrough), None, "flag: {flag}");
         }
+    }
+
+    #[test]
+    fn parse_args_accepts_help_and_version_flags() {
+        let parsed = parse_args(&v(&["--mcpcc-help"])).expect("parse");
+        assert!(parsed.wrapper.help);
+
+        let parsed = parse_args(&v(&["--mcpcc-version"])).expect("parse");
+        assert!(parsed.wrapper.version);
+    }
+
+    #[test]
+    fn expand_response_files_tokenizes_quotes_and_escapes() {
+        let td = TempDir::new("mcpcc-rsp");
+        let rsp = td.path.join("args.rsp");
+        std::fs::write(
+            &rsp,
+            "main.c \"with space.c\" -o 'my out'\n-DNAME=\\\"quoted\\\"",
+        )
+        .expect("write rsp");
+
+        let args = v(&["-Wall", &format!("@{}", rsp.display())]);
+        let expanded = expand_response_files(&args);
+        assert_eq!(
+            expanded,
+            v(&[
+                "-Wall",
+                "main.c",
+                "with space.c",
+                "-o",
+                "my out",
+                "-DNAME=\"quoted\"",
+            ])
+        );
+    }
+
+    #[test]
+    fn expand_response_files_keeps_missing_files_literal() {
+        let args = v(&["@/definitely/not/a/file.rsp", "main.c"]);
+        assert_eq!(expand_response_files(&args), args);
     }
 
     #[test]
