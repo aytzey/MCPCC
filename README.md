@@ -5,12 +5,7 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![MCP](https://img.shields.io/badge/protocol-MCP-8A2BE2.svg)](https://modelcontextprotocol.io)
 
-**Compile any C/C++ program — get an AI-usable MCP tool for free.**
-
-Swap `gcc` for `mcpcc` and every executable you link — from a one-file demo to
-a full autoconf tree like pjsip — comes out with a typed JSON Schema, a
-self-contained MCP server, and zero hand-written glue. It works as a drop-in
-compiler wrapper, so existing CMake/autoconf/Make builds don't change at all.
+**Swap `gcc` for `mcpcc` and every binary you link — from a one-file demo to the full pjsip tree — comes out as a typed, LLM-callable MCP tool. No glue code, no build-system changes.**
 
 `mcpcc` is a drop-in gcc/clang wrapper. It compiles your code exactly like the
 underlying compiler would (same arguments, same binary, same exit code), and
