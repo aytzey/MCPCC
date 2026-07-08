@@ -1,6 +1,16 @@
 # mcpcc
 
+[![CI](https://github.com/aytzey/MCPCC/actions/workflows/ci.yml/badge.svg)](https://github.com/aytzey/MCPCC/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+[![MCP](https://img.shields.io/badge/protocol-MCP-8A2BE2.svg)](https://modelcontextprotocol.io)
+
 **Compile any C/C++ program — get an AI-usable MCP tool for free.**
+
+Swap `gcc` for `mcpcc` and every executable you link — from a one-file demo to
+a full autoconf tree like pjsip — comes out with a typed JSON Schema, a
+self-contained MCP server, and zero hand-written glue. It works as a drop-in
+compiler wrapper, so existing CMake/autoconf/Make builds don't change at all.
 
 `mcpcc` is a drop-in gcc/clang wrapper. It compiles your code exactly like the
 underlying compiler would (same arguments, same binary, same exit code), and
@@ -27,6 +37,18 @@ compiled binary as a typed tool, without you writing a single line of glue.
                                    MCP client (Claude │ tools/list, tools/call
                                    Code/Desktop, …) ──┘
 ```
+
+## Install
+
+```bash
+git clone https://github.com/aytzey/MCPCC && cd MCPCC
+cargo install --path crates/mcpcc-mcp-server   # server template, must sit next to mcpcc
+cargo install --path crates/mcpcc
+```
+
+`mcpcc` locates the `mcpcc-mcp-server` template next to its own executable, so
+installing both into `~/.cargo/bin` (or building the workspace and using
+`target/debug`) is all the setup there is.
 
 ## Quickstart
 
@@ -256,6 +278,10 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/e2e.sh           # offline (llm-mode off)
 ```
 
+CI runs the same four steps plus the CMake end-to-end demo on every push and
+pull request. Contributions are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and code conventions.
+
 ## Security note
 
 The generated server executes the target binary on the host with the caller's
@@ -263,3 +289,7 @@ privileges — running a tool means running that program. There is no sandbox in
 V1 (`x-mcpcc.exec` enforces timeout and output-size limits only). Only expose
 binaries you trust to MCP clients, and treat the artifacts like the executables
 they wrap.
+
+## License
+
+[MIT](LICENSE)
